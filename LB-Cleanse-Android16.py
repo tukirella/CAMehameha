@@ -49,7 +49,7 @@ def show_banner():
 
 class OCILoadBalancerGhostHunter:
     def __init__(self, config_file: Optional[str] = None, profile: str = "DEFAULT"):
-        """Initialize the OCI Ghost Hunter"""
+        """Initialize the LoadBalancer Cleanse"""
         self.config = from_file(config_file or "~/.oci/config", profile)
         self.identity_client = oci.identity.IdentityClient(self.config)
         self.load_balancer_client = oci.load_balancer.LoadBalancerClient(self.config)
@@ -651,7 +651,7 @@ class OCILoadBalancerGhostHunter:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🔍 OCI LoadBalancer Ghost Hunter Report</title>
+    <title>🔍 LoadBalancer Cleanse - Android16 Report</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         
