@@ -3,6 +3,7 @@
 ## CAMehameha
 
 CAMehameha empowers Cloud Adoption Managers with battle-tested scripts, tools, and engagement frameworks to deliver stronger trusted-advisor conversations, accelerate adoption, and maximize customer value.
+Here you will be able to find our Cloud Shell–ready scripts, tools, and small frameworks aimed at improving cost efficiency, governance, security hygiene, and also identifying opportunities to increase and optimize OCI resource consumption.
 
 
 ### 1. 🐉 LoadBalancer Cleanse – Android16 
