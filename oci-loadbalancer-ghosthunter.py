@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 LoadBalancer - Android 16 Cleanse
-Hunt down forgotten and unused OCI Load Balancers across all compartments
+Eliminate low-power and abandoned OCI Load Balancers across all compartments
 
 Requires: oci-cli, oci-python-sdk
 """
