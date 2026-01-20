@@ -862,8 +862,8 @@ class OCILoadBalancerGhostHunter:
                 <p><strong>Analysis Criteria:</strong> Load balancers with Ghost Score ≥ 40 are considered suspicious</p>
             </div>
 
-{healthy_section}
 {no_ghosts_section}
+{healthy_section}
         </div>
 
         <div class="footer">
