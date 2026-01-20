@@ -7,7 +7,7 @@ CAMehameha empowers Cloud Adoption Managers with battle-tested scripts, tools, a
 
 ### 🐉 LoadBalancer Cleanse – Android16 
 
-- 🧼 **Scans all OCI compartments** to detect abandoned, underutilized, or misconfigured Classic & Network Load Balancers  
+- 🧼 **Scans all OCI compartments** to detect abandoned, underutilized, or misconfigured Classic & Network LB.  
 - ⚙️ **Analyzes** listeners, backend sets, health status, lifecycle state, age, and configuration drift  
 - 📊 **Assigns a per-LB Ghost Score** to quantify risk, waste, and cleanup priority  
 - 📄 **Generates a detailed CSV export** for offline analysis and governance  
