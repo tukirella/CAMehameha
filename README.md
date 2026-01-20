@@ -6,9 +6,11 @@ CAMehameha empowers Cloud Adoption Managers with battle-tested scripts, tools, a
 Here you will be able to find our Cloud Shell–ready scripts, tools, and small frameworks aimed at improving cost efficiency, governance, security hygiene, and also identifying opportunities to increase and optimize OCI resource consumption.
 
 
-### 1. 🐉 LoadBalancer Cleanse – Android16 
+### 1. 🐉 LoadBalancer Cleanse – Android16 <img width="1800" height="900" alt="image" src="https://github.com/user-attachments/assets/050bf7bb-872b-47cd-bdda-a4998e4e9f3a" />
 
-A Python utility designed to run directly in OCI Cloud Shell, scanning all compartments to identify abandoned, underutilized, or misconfigured Classic & Network Load Balancers.
+
+Our first script which helps to optimization utility that scans all compartments to detect abandoned, underutilized, or misconfigured Classic and Network Load Balancers.
+**Inspired by one of Dragon-Ball Z characters named "Android 16"**, a calm and precise nature, the tool analyzes listeners, backend sets, lifecycle state, age, and configuration health to calculate a “Ghost Score.” Results are delivered via detailed CSV and interactive HTML reports, helping teams eliminate waste, reduce cost, and restore balance across OCI environments.
 
 What it does?
 
