@@ -887,21 +887,18 @@ class OCILoadBalancerGhostHunter:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="OCI LoadBalancer Ghost Hunter - Hunt down forgotten and unused OCI Load Balancers",
+        description="LoadBalancer Cleanse - Hunt down forgotten and unused OCI Load Balancers",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic ghost hunt across all compartments
-  python oci-loadbalancer-ghosthunter.py
+  # Basic clease hunt across all compartments
+  python3 LB-Cleanse-Android16.py
   
   # Hunt specific compartments only
-  python oci-loadbalancer-ghosthunter.py --compartments ocid1.compartment.oc1..aaa...
-  
-  # Custom file paths
-  python oci-loadbalancer-ghosthunter.py --csv-path /tmp/ghosts.csv --html-path /tmp/report.html
+  python3 LB-Cleanse-Android16.py --compartments ocid1.compartment.oc1..aaa...
   
   # Use specific OCI config profile
-  python oci-loadbalancer-ghosthunter.py --profile PROD --config-file ~/.oci/config
+  python3 LB-Cleanse-Android16.py --profile PROD --config-file ~/.oci/config
         """
     )
     
@@ -921,7 +918,7 @@ Examples:
     )
     parser.add_argument(
         '--csv-path',
-        default=f"oci_ghost_loadbalancers_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        default=f"oci_lbclease_android16_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         help='Path for CSV export'
     )
     parser.add_argument(
@@ -944,7 +941,7 @@ Examples:
         logging.basicConfig(level=logging.WARNING)
     
     try:
-        # Initialize the ghost hunter
+        # Initialize LB clease
         hunter = OCILoadBalancerGhostHunter(args.config_file, args.profile)
         
         # Scan load balancers
@@ -958,10 +955,10 @@ Examples:
         hunter.generate_html_report(args.html_path)
         
         print()
-        print_colored("🎉 Ghost hunt complete!", Colors.SUCCESS)
+        print_colored("🎉 LB clease complete!", Colors.SUCCESS)
         
     except Exception as e:
-        print_colored(f"❌ Ghost hunt failed: {e}", Colors.ERROR)
+        print_colored(f"❌ LB clease failed: {e}", Colors.ERROR)
         if args.verbose:
             import traceback
             traceback.print_exc()
