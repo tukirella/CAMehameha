@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LoadBalancer - Android 16 Cleanse
+LoadBalancer Cleanse - Android16 
 Eliminate low-power and abandoned OCI Load Balancers across all compartments
 
 Requires: oci-cli, oci-python-sdk
@@ -842,8 +842,8 @@ class OCILoadBalancerGhostHunter:
 <body>
     <div class="container">
         <div class="header">
-            <h1>🔍 LoadBalancer - Android 16 Cleanse</h1>
-            <div class="subtitle">OCI CAMehameha</div>
+            <h1>🔍 LoadBalancer Cleanse - Android16 </h1>
+            <div class="subtitle">Eliminate low-power and abandoned OCI Load Balancers across all compartments</div>
         </div>
         
         <div class="stats-grid">
