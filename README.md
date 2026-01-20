@@ -1,6 +1,9 @@
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/da8367a3-756a-4923-8f15-872abae67ccb" />
+
 ## CAMehameha
 
 CAMehameha empowers Cloud Adoption Managers with battle-tested scripts, tools, and engagement frameworks to deliver stronger trusted-advisor conversations, accelerate adoption, and maximize customer value.
+
 
 ### 🐉 LoadBalancer Cleanse – Android16 
 
