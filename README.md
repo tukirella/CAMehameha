@@ -22,7 +22,12 @@ What it does?
 - 📄 **Generates a detailed CSV export** for offline analysis and governance.
 - 🌐 **Produces an interactive HTML report** with scores, findings, and configuration details per Load Balancer.
 - 🧹 **Helps teams eliminate waste**, reduce cost, and restore balance across OCI environments.
-<img width="1401" height="905" alt="Screenshot 2026-01-20 173012" src="https://github.com/user-attachments/assets/9b8e5253-6172-4a90-beec-6d12729ea8f7" />
+<img width="700" height="452" alt="Screenshot 2026-01-20 173012" src="https://github.com/user-attachments/assets/9b8e5253-6172-4a90-beec-6d12729ea8f7" />
+
+
+
+______________________________________________________________________________________________________________________________________________________________________________________________
+
 
 
 ### 2. 🐉 Next Gen Dicover - KING KAI 
