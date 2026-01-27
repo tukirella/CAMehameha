@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-👑 KING KAI — OCI Shapes Upgrade Report (no costs, split AMD/Intel, timestamped outputs)
+👑 KING KAI — OCI Shapes Upgrade Report (timestamped outputs, AMD/Intel split, +oCPU/Memory)
 
 Run:
   python3 oci_forgotten_resources_king_kai.py --shapes-upgrade-report
@@ -13,13 +13,16 @@ HTML:
   - No OCID and no compartment details
   - Two sections:
       AMD table columns:
-        Risk, Shape, Instance Name, Lifecycle, VM.Standard.E5.Flex avail (✅/❌), VM.Standard.E6.Flex avail (✅/❌)
+        Risk, oCPU, Memory [GB], Shape, Instance Name, Lifecycle,
+        VM.Standard.E5.Flex avail (✅/❌), VM.Standard.E6.Flex avail (✅/❌)
       Intel table columns:
-        Risk, Shape, Instance Name, Lifecycle, VM.Standard3.Flex avail (✅/❌), VM.Optimized3.Flex avail (✅/❌)
+        Risk, oCPU, Memory [GB], Shape, Instance Name, Lifecycle,
+        VM.Standard3.Flex avail (✅/❌), VM.Optimized3.Flex avail (✅/❌)
   - Rows sorted by Shape (descending) within each table
 
 CSV:
   - Includes OCID + compartment details for advanced use
+  - Includes oCPU + Memory [GB] columns as well
 """
 
 import oci
@@ -61,6 +64,27 @@ OPT3_TARGET = "VM.Optimized3.Flex"
 
 
 # ------------------------------------------------------------
+#  Fixed-shape memory best-effort mappings (GB)
+# ------------------------------------------------------------
+E2_FIXED_MEM_GB = {
+    "VM.Standard.E2.1": 8,
+    "VM.Standard.E2.2": 16,
+    "VM.Standard.E2.4": 32,
+    "VM.Standard.E2.8": 64,
+}
+
+STD2_FIXED_MEM_GB = {
+    "VM.Standard2.1": 15,
+    "VM.Standard2.2": 30,
+    "VM.Standard2.4": 60,
+    "VM.Standard2.8": 120,
+    "VM.Standard2.16": 240,
+    # Best-effort for 24 (common linear scaling):
+    "VM.Standard2.24": 360,
+}
+
+
+# ------------------------------------------------------------
 #  Helpers
 # ------------------------------------------------------------
 def esc(s: Any) -> str:
@@ -72,6 +96,15 @@ def esc(s: Any) -> str:
 def now_stamp_utc() -> str:
     # Matches: king-kaiYYYYMMDD-HHMM
     return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+
+
+def fmt_num(v: Optional[float]) -> str:
+    if v is None:
+        return "Unknown"
+    # Render 4.0 as 4, keep decimals otherwise
+    if abs(v - int(v)) < 1e-9:
+        return str(int(v))
+    return str(v)
 
 
 def collect_all_compartments(identity_client, tenancy_id: str) -> Tuple[List[str], Dict[str, str]]:
@@ -139,6 +172,38 @@ def risk_for_shape(shape: str) -> str:
     if shape == "VM.Standard.E3.Flex":
         return "High"
     return "Medium"
+
+
+def infer_ocpu_mem(shape: str, shape_config: Optional[Any]) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Returns (ocpus, memory_gb).
+    - For Flex shapes: use shape_config.ocpus and shape_config.memory_in_gbs when available
+    - For fixed E2/Standard2: infer from known mappings
+    """
+    if shape_config is not None:
+        ocpus = getattr(shape_config, "ocpus", None)
+        mem = getattr(shape_config, "memory_in_gbs", None)
+        if ocpus is not None and mem is not None:
+            try:
+                return float(ocpus), float(mem)
+            except Exception:
+                pass
+
+    if shape in E2_FIXED_MEM_GB:
+        try:
+            ocpu = float(shape.split(".")[-1])
+        except Exception:
+            ocpu = None
+        return ocpu, float(E2_FIXED_MEM_GB.get(shape))
+
+    if shape in STD2_FIXED_MEM_GB:
+        try:
+            ocpu = float(shape.split(".")[-1])
+        except Exception:
+            ocpu = None
+        return ocpu, float(STD2_FIXED_MEM_GB.get(shape))
+
+    return None, None
 
 
 # ------------------------------------------------------------
@@ -356,19 +421,23 @@ def scan_compartment_shapes_only(
         if not match:
             continue
 
-        # Enrich with get_instance to reliably get AD
+        # Enrich with get_instance to reliably get AD + shape_config
         ad = getattr(inst, "availability_domain", None)
         lifecycle = getattr(inst, "lifecycle_state", None)
         name = getattr(inst, "display_name", inst.id)
         ocid = getattr(inst, "id", None)
+        shape_config = getattr(inst, "shape_config", None)
 
         try:
             full = compute_client.get_instance(inst.id).data
             ad = getattr(full, "availability_domain", ad)
             lifecycle = getattr(full, "lifecycle_state", lifecycle)
             name = getattr(full, "display_name", name)
+            shape_config = getattr(full, "shape_config", shape_config)
         except Exception:
             pass
+
+        ocpus, mem_gb = infer_ocpu_mem(shape, shape_config)
 
         out_rows.append({
             "name": name,
@@ -379,6 +448,8 @@ def scan_compartment_shapes_only(
             "ocid": ocid,
             "risk": risk_for_shape(shape),
             "category": "AMD" if is_amd_old(shape) else ("Intel" if is_intel_old(shape) else "Other"),
+            "ocpus": ocpus,
+            "mem_gb": mem_gb,
         })
 
 
@@ -392,6 +463,8 @@ def html_table_amd(rows: List[Dict[str, Any]]) -> str:
     out.append(
         "<tr>"
         "<th>Risk</th>"
+        "<th>oCPU</th>"
+        "<th>Memory [GB]</th>"
         "<th>Shape</th>"
         "<th>Instance Name</th>"
         "<th>Lifecycle</th>"
@@ -405,6 +478,8 @@ def html_table_amd(rows: List[Dict[str, Any]]) -> str:
         out.append(
             f"<tr class='{row_class}'>"
             f"<td><strong>{esc(risk)}</strong></td>"
+            f"<td style='text-align:right'>{esc(fmt_num(r.get('ocpus')))}</td>"
+            f"<td style='text-align:right'>{esc(fmt_num(r.get('mem_gb')))}</td>"
             f"<td class='mono'>{esc(r['shape'])}</td>"
             f"<td>{esc(r['name'])}</td>"
             f"<td>{esc(r.get('lifecycle_state',''))}</td>"
@@ -423,6 +498,8 @@ def html_table_intel(rows: List[Dict[str, Any]]) -> str:
     out.append(
         "<tr>"
         "<th>Risk</th>"
+        "<th>oCPU</th>"
+        "<th>Memory [GB]</th>"
         "<th>Shape</th>"
         "<th>Instance Name</th>"
         "<th>Lifecycle</th>"
@@ -436,6 +513,8 @@ def html_table_intel(rows: List[Dict[str, Any]]) -> str:
         out.append(
             f"<tr class='{row_class}'>"
             f"<td><strong>{esc(risk)}</strong></td>"
+            f"<td style='text-align:right'>{esc(fmt_num(r.get('ocpus')))}</td>"
+            f"<td style='text-align:right'>{esc(fmt_num(r.get('mem_gb')))}</td>"
             f"<td class='mono'>{esc(r['shape'])}</td>"
             f"<td>{esc(r['name'])}</td>"
             f"<td>{esc(r.get('lifecycle_state',''))}</td>"
@@ -451,7 +530,7 @@ def html_table_intel(rows: List[Dict[str, Any]]) -> str:
 #  Main
 # ------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="👑 KING KAI — Shapes Upgrade Report (timestamped, AMD/Intel split, no costs)")
+    parser = argparse.ArgumentParser(description="👑 KING KAI — Shapes Upgrade Report (+oCPU/Memory, timestamped, AMD/Intel split, no costs)")
 
     parser.add_argument("--profile", default="DEFAULT", help="OCI CLI profile name from ~/.oci/config (default: DEFAULT)")
     parser.add_argument("--output-dir", default=".", help="Directory to write reports (default: current directory)")
@@ -519,13 +598,12 @@ def main():
         )
 
     # Build caches for upgrade availability checks
-    # 1) AD catalog shapes cache
     ads_to_check: Set[str] = set([r["availability_domain"] for r in all_rows if r.get("availability_domain")]) or set(availability_domains)
+
     shapes_cache_by_ad: Dict[str, Set[str]] = {}
     for ad in sorted([a for a in ads_to_check if a]):
         shapes_cache_by_ad[ad] = list_shapes_in_ad(compute_client, tenancy_id, ad)
 
-    # 2) Limits: map targets -> limit names
     service_name = discover_compute_service_name(limits_client, tenancy_id)
     limit_index = build_limit_value_index(limits_client, tenancy_id, service_name)
     all_limit_names = {k[0] for k in limit_index.keys() if k and k[0]}
@@ -533,7 +611,6 @@ def main():
     targets = [E5_TARGET, E6_TARGET, STD3_TARGET, OPT3_TARGET]
     target_to_limits: Dict[str, List[str]] = {t: find_limit_names_for_target(all_limit_names, t) for t in targets}
 
-    # 3) Resource availability cache
     ra_cache: Dict[Tuple[str, str, Optional[str]], Optional[Dict[str, Any]]] = {}
 
     # Compute per-instance icons
@@ -560,7 +637,7 @@ def main():
     # --------------- Generate CSV (keeps OCID + compartment details) ----------------
     with open(csv_path, mode="w", newline="", encoding="utf-8") as csvfile:
         fieldnames = [
-            "Category", "Risk", "Shape", "InstanceName", "Lifecycle",
+            "Category", "Risk", "oCPU", "MemoryGB", "Shape", "InstanceName", "Lifecycle",
             "AvailabilityDomain",
             "CompartmentName", "CompartmentId", "OCID",
             f"{E5_TARGET}_avail", f"{E6_TARGET}_avail",
@@ -574,6 +651,8 @@ def main():
             writer.writerow({
                 "Category": r.get("category", ""),
                 "Risk": r.get("risk", ""),
+                "oCPU": fmt_num(r.get("ocpus")),
+                "MemoryGB": fmt_num(r.get("mem_gb")),
                 "Shape": r.get("shape", ""),
                 "InstanceName": r.get("name", ""),
                 "Lifecycle": r.get("lifecycle_state", ""),
@@ -611,6 +690,8 @@ def main():
 
     .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:12px; }}
     .note {{ font-size:12px; color:#555; margin-top:10px; }}
+    .num {{ text-align:right; }}
+    .center {{ text-align:center; }}
   </style>
 </head>
 <body>
