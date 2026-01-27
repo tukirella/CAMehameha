@@ -31,7 +31,7 @@ ________________________________________________________________________________
 
 
 ### 2. 🐉 Shape Upgrade Advisor - KING KAI 
-<img width="197" height="148" alt="image" src="https://github.com/user-attachments/assets/76fbf235-c405-4b5e-a3cc-f911f2cec3d7" />
+<img width="180" height="95" alt="image" src="https://github.com/user-attachments/assets/2f6da761-7d2a-4812-a853-1412c2ceae59" />
 
 Sniffs out forgotten cloud resources in your OCI tenancy—no manual sleuthing required.
 
