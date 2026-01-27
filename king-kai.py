@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-👑 KING KAI — OCI Shapes Upgrade Report (with costs + E5/E6 upgrade deltas)
+👑 KING KAI — OCI Shapes Upgrade Report (Costs + E5/E6 deltas)
 
 Run:
   python3 oci_forgotten_resources_king_kai.py --shapes-upgrade-report
@@ -26,19 +26,21 @@ What it does:
 
 Costs:
 - Current cost/mo is pulled from OCI Usage API (COST query) grouped by resourceId for current month.
-- Upgrade monthly cost is estimated using LIST PAYG unit rates:
-    E5: $0.03 per OCPU-hour, $0.002 per GB-hour
-    E6: same as E5
+- Usage API is called in the tenancy HOME REGION (best practice), even if you run Cloud Shell in Frankfurt.
+- If Usage API fails (permissions/region), the script prints the real error and shows "Unknown".
+
+Upgrade monthly cost estimate (for delta):
+- Uses LIST PAYG unit rates:
+    E5/E6: $0.03 per OCPU-hour, $0.002 per GB-hour
   (730 hours per month)
 - Delta = estimated_target - current_actual_month_cost
-- If Usage API is not accessible (permissions), Current Cost/mo + deltas will show "Unknown".
 
 Upgrade availability ✅/❌:
-- ✅ if target shape exists in AD catalog (list_shapes) AND quota/available signals are not explicitly 0 (when available).
+- ✅ if target shape exists in AD catalog (list_shapes) AND quota/available signals are not explicitly 0 (when supported).
 - ❌ if not offered in AD, or quota/available is 0, or AD is unknown.
 
 Notes:
-- E5/E6 columns are meaningful for AMD old shapes. Intel old shapes will show "—" in E5/E6 columns.
+- E5/E6 columns apply to AMD old shapes. Intel old shapes show "—" in E5/E6 columns.
 """
 
 import oci
@@ -48,7 +50,7 @@ import re
 import sys
 import html as htmlmod
 from collections import Counter
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Set, Tuple
 
 
@@ -82,8 +84,7 @@ E5_TARGET = "VM.Standard.E5.Flex"
 E6_TARGET = "VM.Standard.E6.Flex"
 
 # Pricing (list PAYG). Used to estimate E5/E6 monthly cost.
-# E5: $0.03 per OCPU-hour, $0.002 per GB-hour
-# E6: same as E5
+# E5/E6: $0.03 per OCPU-hour, $0.002 per GB-hour
 E5_E6_OCPU_PER_HOUR_USD = 0.03
 E5_E6_MEM_GB_PER_HOUR_USD = 0.002
 HOURS_PER_MONTH = 730  # monthly estimation baseline
@@ -148,6 +149,26 @@ def list_availability_domains(identity_client, tenancy_id: str) -> List[str]:
         return []
 
 
+def get_home_region_name(identity_client, tenancy_id: str) -> str:
+    """
+    Returns the tenancy home region name (e.g., eu-frankfurt-1) by mapping home_region_key to region name.
+    If anything fails, returns empty string.
+    """
+    try:
+        tenancy = identity_client.get_tenancy(tenancy_id).data
+        home_key = getattr(tenancy, "home_region_key", None)
+        if not home_key:
+            return ""
+
+        regions = oci.pagination.list_call_get_all_results(identity_client.list_regions).data
+        for r in regions:
+            if getattr(r, "key", None) == home_key:
+                return getattr(r, "name", "")
+    except Exception:
+        pass
+    return ""
+
+
 # ------------------------------------------------------------
 #  Shape -> Risk and shape -> upgrade targets
 # ------------------------------------------------------------
@@ -182,7 +203,6 @@ def upgrade_targets_for_shape(shape: str) -> List[str]:
 
 # ------------------------------------------------------------
 #  OCPU/Memory inference for legacy fixed shapes
-#  (E2 fixed shape memory from Oracle Compute FAQ)
 # ------------------------------------------------------------
 E2_FIXED_MEM_GB = {
     "VM.Standard.E2.1": 8,
@@ -197,7 +217,7 @@ STD2_FIXED_MEM_GB = {
     "VM.Standard2.4": 60,
     "VM.Standard2.8": 120,
     "VM.Standard2.16": 240,
-    # 24 not explicitly listed in the snippet; best-effort assumption:
+    # Best-effort for 24:
     "VM.Standard2.24": 360,
 }
 
@@ -208,16 +228,13 @@ def infer_ocpu_mem(shape: str, shape_config: Optional[Any]) -> Tuple[Optional[fl
     - For Flex shapes: use shape_config.ocpus and shape_config.memory_in_gbs when available
     - For fixed E2/Standard2: infer from known mappings
     """
-    # Flex shapes
     if shape_config is not None:
         ocpus = getattr(shape_config, "ocpus", None)
         mem = getattr(shape_config, "memory_in_gbs", None)
         if ocpus is not None and mem is not None:
             return float(ocpus), float(mem)
 
-    # Fixed E2
     if shape in E2_FIXED_MEM_GB:
-        # E2.<n> => n OCPUs
         try:
             ocpu = float(shape.split(".")[-1])
         except Exception:
@@ -225,7 +242,6 @@ def infer_ocpu_mem(shape: str, shape_config: Optional[Any]) -> Tuple[Optional[fl
         mem = float(E2_FIXED_MEM_GB.get(shape))
         return ocpu, mem
 
-    # Fixed Standard2
     if shape in STD2_FIXED_MEM_GB:
         try:
             ocpu = float(shape.split(".")[-1])
@@ -323,12 +339,6 @@ def get_resource_availability_safe(
 
 
 def find_limit_names_for_target(all_limit_names: Set[str], target_shape: str) -> List[str]:
-    """
-    Tries to locate limit names that correspond to the target shape family.
-    For E5/E6 we look for prefixes "standard-e5"/"standard-e6" and pick:
-      - one core limit
-      - one memory limit
-    """
     if target_shape == E5_TARGET:
         prefixes = ["standard-e5"]
     elif target_shape == E6_TARGET:
@@ -396,7 +406,7 @@ def fetch_month_costs_by_resource_id(
 ) -> Tuple[Dict[str, float], str]:
     """
     Best-effort: returns (resource_id -> computed_amount, currency_symbol)
-    If API fails, returns ({}, "$") and caller treats as Unknown.
+    If API fails, returns ({}, "$") and prints the real error.
     """
     costs: Dict[str, float] = {}
     currency_symbol = "$"
@@ -411,15 +421,14 @@ def fetch_month_costs_by_resource_id(
             group_by=["resourceId"],
         )
 
-        # SDK method name varies slightly across versions; try both.
         call = getattr(usage_client, "request_summarized_usages", None) or getattr(usage_client, "request_summarized_usage", None)
         if call is None:
+            print("⚠️ Usage API client missing request_summarized_usages method; cannot query costs.")
             return {}, currency_symbol
 
         resp = call(details)
         data = resp.data
 
-        # currency sometimes provided in response
         currency = getattr(data, "currency", None) or getattr(data, "billing_currency", None)
         if isinstance(currency, str) and currency.upper() == "USD":
             currency_symbol = "$"
@@ -446,7 +455,8 @@ def fetch_month_costs_by_resource_id(
 
         return costs, currency_symbol
 
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ Usage API cost query failed: {e}")
         return {}, currency_symbol
 
 
@@ -477,7 +487,7 @@ def scan_compartment_shapes_only(
         if not match:
             continue
 
-        # Always enrich matched instances with get_instance to reliably get AD + shape_config
+        # Enrich with get_instance to reliably get AD + shape_config
         ad = getattr(inst, "availability_domain", None)
         shape_config = getattr(inst, "shape_config", None)
         lifecycle = getattr(inst, "lifecycle_state", None)
@@ -546,7 +556,6 @@ def compute_upgrade_advice_summary(
         "targets": targets,
         "ads": sorted(list(ads_seen)) if ads_seen else sorted([a for a in availability_domains if a]),
         "catalog": {},
-        "limits": [],
         "compute_service": "",
         "target_to_limits": {},
     }
@@ -554,7 +563,7 @@ def compute_upgrade_advice_summary(
     if not targets:
         return advice
 
-    # Catalog per AD
+    # Catalog per AD (for advisor header only)
     for ad in advice["ads"]:
         shape_set = list_shapes_in_ad(compute_client, tenancy_id, ad)
         advice["catalog"][ad] = {
@@ -600,7 +609,7 @@ def evaluate_upgrade_option(
 
     limit_names = target_to_limits.get(target_shape, [])
     if not limit_names:
-        return True  # catalog ok is enough for ✅ in this phase
+        return True  # catalog ok
 
     for ln in limit_names:
         key = (instance_compartment_id, ln, instance_ad)
@@ -623,7 +632,7 @@ def evaluate_upgrade_option(
 
 
 # ------------------------------------------------------------
-#  HTML rendering
+#  HTML rendering (Advisor header)
 # ------------------------------------------------------------
 def render_advisor_block_html(advice: Dict[str, Any]) -> str:
     if not advice:
@@ -711,10 +720,16 @@ def main():
     compute_client  = oci.core.ComputeClient(config)
     limits_client   = oci.limits.LimitsClient(config)
 
-    # Usage API client (best-effort for current monthly spend)
+    # Usage API client (best-effort for current monthly spend) -> use HOME REGION
+    usage_client = None
+    usage_region = get_home_region_name(identity_client, tenancy_id)
     try:
-        usage_client = oci.usage_api.UsageapiClient(config)
-    except Exception:
+        usage_cfg = dict(config)
+        if usage_region:
+            usage_cfg["region"] = usage_region
+        usage_client = oci.usage_api.UsageapiClient(usage_cfg)
+    except Exception as e:
+        print(f"⚠️ Usage API client init failed (home_region={usage_region or 'unknown'}): {e}")
         usage_client = None
 
     compartments, comp_name_by_id = collect_all_compartments(identity_client, tenancy_id)
@@ -899,7 +914,8 @@ def main():
   <p><strong>Generated:</strong> {esc(now)}</p>
   <p><strong>Old instances found:</strong> {len(old_gen_tracker)}</p>
   <p class="note">
-    Current cost/mo is pulled from OCI Usage API for the current month window ({esc(start_utc.strftime("%Y-%m-%d"))} → {esc(end_utc.strftime("%Y-%m-%d"))}).
+    Usage API region (home region): <strong>{esc(usage_region or "unknown")}</strong><br/>
+    Current cost/mo is pulled from OCI Usage API for the current month window ({esc(start_utc.strftime("%Y-%m-%d"))} → {esc(end_utc.strftime("%Y-%m-%d"))}).<br/>
     E5/E6 deltas use list PAYG estimation (OCPU+Memory) with {HOURS_PER_MONTH} hrs/month.
   </p>
 
@@ -972,16 +988,9 @@ def main():
             if current_cost is not None:
                 e5_est = estimate_e5_e6_monthly_cost_usd(ocpus, mem_gb)
                 e6_est = estimate_e5_e6_monthly_cost_usd(ocpus, mem_gb)
-                if e5_est is not None:
-                    e5_delta_str = fmt_money(round(e5_est - float(current_cost), 2), currency_symbol)
-                else:
-                    e5_delta_str = "Unknown"
-                if e6_est is not None:
-                    e6_delta_str = fmt_money(round(e6_est - float(current_cost), 2), currency_symbol)
-                else:
-                    e6_delta_str = "Unknown"
+                e5_delta_str = fmt_money(round(e5_est - float(current_cost), 2), currency_symbol) if e5_est is not None else "Unknown"
+                e6_delta_str = fmt_money(round(e6_est - float(current_cost), 2), currency_symbol) if e6_est is not None else "Unknown"
             else:
-                # If current cost not available => delta unknown (but keep ✅/❌)
                 e5_delta_str = "Unknown"
                 e6_delta_str = "Unknown"
 
