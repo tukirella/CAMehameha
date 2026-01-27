@@ -1,31 +1,19 @@
 #!/usr/bin/env python3
 """
-👑 KING KAI — OCI Forgotten Resource Detective (vNext)
+👑 KING KAI — OCI Shapes Upgrade Report
 
-Modes:
-  1) Shapes Upgrade Report (recommended):
-       --shapes-upgrade-report
-     Scans ONLY the predefined old shapes (AMD E2/E3/E4 + Intel Standard2) and produces:
-       - counts
-       - upgrade targets
-       - per-AD shape catalog presence
-       - limits/usage/available (like OCI console "Limits, quotas and usage")
-     HTML/CSV will include ONLY shapes-related content.
+Shapes-only mode (recommended):
+  python3 oci_forgotten_resources_king_kai.py --shapes-upgrade-report
 
-  2) Full scan (optional):
-       --scan-mode full
-     Runs the original forgotten-resource checks too (IPs, NSGs, LBs, orphan volumes, etc.)
-
-Notes:
-  - Region is taken from the OCI config profile (DEFAULT unless overridden).
-  - Limits names are discovered dynamically (e.g., *-regional-count) to match console behavior.
-
-Usage:
-  Shapes-only:
-    python3 oci_forgotten_resources_king_kai.py --shapes-upgrade-report
-
-  Full scan:
-    python3 oci_forgotten_resources_king_kai.py --scan-mode full
+What it does:
+- Scans ALL compartments (root + active sub-compartments)
+- Finds instances that match the predefined "old shapes" list (AMD E2/E3/E4 + Intel Standard2 sizes)
+- Produces HTML + CSV with:
+    * per-instance risk level
+    * per-instance upgrade recommendations
+    * ✅/❌ for upgrade targets based on:
+        - shape offered in region/AD catalog (list_shapes)
+        - tenancy/quota availability signals (Limits resource availability where supported)
 """
 
 import oci
@@ -37,6 +25,7 @@ import html as htmlmod
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Set, Tuple
+
 
 # ------------------------------------------------------------
 #  Old shapes to scan (as requested)
@@ -63,6 +52,7 @@ OLD_SHAPES_SET: Set[str] = {
 AMD_UPGRADE_TARGETS = ["VM.Standard.E5.Flex", "VM.Standard.E6.Flex"]
 INTEL_UPGRADE_TARGETS = ["VM.Standard3.Flex", "VM.Optimized3.Flex"]
 
+
 # ------------------------------------------------------------
 #  Helpers
 # ------------------------------------------------------------
@@ -71,10 +61,6 @@ def esc(s: Any) -> str:
         return ""
     return htmlmod.escape(str(s), quote=True)
 
-def has_no_tags(resource) -> bool:
-    ff = getattr(resource, "freeform_tags", None)
-    df = getattr(resource, "defined_tags", None)
-    return (not ff or len(ff) == 0) and (not df or len(df) == 0)
 
 def collect_all_compartments(identity_client, tenancy_id: str):
     """
@@ -105,6 +91,7 @@ def collect_all_compartments(identity_client, tenancy_id: str):
     comp_ids.append(tenancy_id)
     return comp_ids, comp_name_by_id
 
+
 def list_availability_domains(identity_client, tenancy_id: str) -> List[str]:
     try:
         ads = oci.pagination.list_call_get_all_results(
@@ -115,43 +102,51 @@ def list_availability_domains(identity_client, tenancy_id: str) -> List[str]:
     except Exception:
         return []
 
+
 # ------------------------------------------------------------
-#  👑 KING KAI — Upgrade Advisor (limits + catalog)
+#  Risk and upgrade mapping (per instance)
 # ------------------------------------------------------------
-def classify_old_shape(shape: str) -> str:
-    if re.match(r"^VM\.Standard\.E2\b", shape): return "AMD_E2"
-    if re.match(r"^VM\.Standard\.E3\b", shape): return "AMD_E3"
-    if re.match(r"^VM\.Standard\.E4\b", shape): return "AMD_E4"
-    if re.match(r"^VM\.Standard2\b", shape):    return "INTEL_STD2"
-    if re.match(r"^VM\.Standard1\b", shape):    return "INTEL_STD1"  # kept for backward compat
-    return "OTHER"
+def risk_for_shape(shape: str) -> str:
+    """
+    HIGH:
+      - AMD VM.Standard.E2.*
+      - AMD VM.Standard.E3.Flex
+    MEDIUM:
+      - everything else in old list
+    """
+    if re.match(r"^VM\.Standard\.E2\.\d+$", shape):
+        return "High"
+    if shape == "VM.Standard.E3.Flex":
+        return "High"
+    return "Medium"
 
-def recommended_targets(counts: Dict[str, int]) -> List[str]:
-    targets: List[str] = []
-    amd_present = (counts.get("AMD_E2", 0) + counts.get("AMD_E3", 0) + counts.get("AMD_E4", 0)) > 0
-    intel_present = (counts.get("INTEL_STD1", 0) + counts.get("INTEL_STD2", 0)) > 0
-    if amd_present:
-        targets.extend(AMD_UPGRADE_TARGETS)
-    if intel_present:
-        targets.extend(INTEL_UPGRADE_TARGETS)
-    return targets
 
-def list_shapes_in_ad(compute_client, tenancy_id: str, ad: str) -> Set[str]:
-    try:
-        shapes = oci.pagination.list_call_get_all_results(
-            compute_client.list_shapes,
-            compartment_id=tenancy_id,
-            availability_domain=ad
-        ).data
-        return {getattr(s, "shape", "") for s in shapes if getattr(s, "shape", "")}
-    except Exception:
-        return set()
+def upgrade_targets_for_shape(shape: str) -> List[str]:
+    """
+    AMD:
+      E2.* / E3.Flex / E4.Flex -> E5/E6 Flex
+    Intel:
+      Standard2.* -> Standard3.Flex / Optimized3.Flex
+    """
+    if re.match(r"^VM\.Standard\.E2\.\d+$", shape) or shape in ("VM.Standard.E3.Flex", "VM.Standard.E4.Flex"):
+        return AMD_UPGRADE_TARGETS
+    if re.match(r"^VM\.Standard2\.\d+$", shape):
+        return INTEL_UPGRADE_TARGETS
+    return []
 
-def discover_compute_service_name(limits_client, tenancy_id: str) -> str:
+
+# ------------------------------------------------------------
+#  Limits helpers (to mirror Console "Limits, quotas and usage")
+# ------------------------------------------------------------
+def discover_compute_service_name(limits_client, compartment_id: str) -> str:
+    """
+    Limits service uses a service_name string (often 'compute').
+    We attempt to discover it, defaulting to 'compute'.
+    """
     try:
         svcs = oci.pagination.list_call_get_all_results(
             limits_client.list_services,
-            compartment_id=tenancy_id
+            compartment_id=compartment_id
         ).data
         for s in svcs:
             name = (getattr(s, "name", None) or getattr(s, "service_name", None) or "")
@@ -163,6 +158,7 @@ def discover_compute_service_name(limits_client, tenancy_id: str) -> str:
     except Exception:
         pass
     return "compute"
+
 
 def build_limit_value_index(limits_client, compartment_id: str, service_name: str) -> Dict[Tuple[str, str, Optional[str]], Any]:
     """
@@ -186,18 +182,17 @@ def build_limit_value_index(limits_client, compartment_id: str, service_name: st
         pass
     return index
 
+
 def get_resource_availability_safe(
     limits_client,
     service_name: str,
     compartment_id: str,
     limit_name: str,
-    ad: Optional[str],
-):
+    availability_domain: Optional[str],
+) -> Optional[Dict[str, Any]]:
     """
-    Try to fetch used/available/effective_quota_value.
-    Mirrors the console's "Usage" + "Available" behavior when supported.
+    Try to fetch used/available/effective_quota_value (region first, then AD).
     """
-    # REGION scope
     try:
         ra = limits_client.get_resource_availability(
             service_name=service_name,
@@ -210,14 +205,13 @@ def get_resource_availability_safe(
             "effective_quota_value": getattr(ra, "effective_quota_value", None),
         }
     except oci.exceptions.ServiceError:
-        # Try AD scope
-        if ad:
+        if availability_domain:
             try:
                 ra = limits_client.get_resource_availability(
                     service_name=service_name,
                     limit_name=limit_name,
                     compartment_id=compartment_id,
-                    availability_domain=ad
+                    availability_domain=availability_domain
                 ).data
                 return {
                     "available": getattr(ra, "available", None),
@@ -228,12 +222,12 @@ def get_resource_availability_safe(
                 return None
         return None
 
+
 def find_limit_names_for_target(all_limit_names: Set[str], target_shape: str) -> List[str]:
     """
     Dynamically find the correct limit names (often '*-regional-count') for each target.
-    We pick "core" + "memory" limits where possible.
+    We pick 1 core + 1 memory limit where possible.
     """
-    # Prefixes aligned to the console naming style
     if target_shape == "VM.Standard.E5.Flex":
         prefixes = ["standard-e5"]
     elif target_shape == "VM.Standard.E6.Flex":
@@ -245,18 +239,16 @@ def find_limit_names_for_target(all_limit_names: Set[str], target_shape: str) ->
     else:
         prefixes = []
 
-    hits = []
+    hits: List[str] = []
     for p in prefixes:
         core = sorted([n for n in all_limit_names if n.startswith(p) and "core" in n and ("regional" in n or n.endswith("count"))])
         mem  = sorted([n for n in all_limit_names if n.startswith(p) and "memory" in n and ("regional" in n or n.endswith("count"))])
 
-        # Prefer common patterns first
-        def prefer_regional_count(names: List[str]) -> List[str]:
-            ranked = sorted(names, key=lambda x: (0 if "regional-count" in x else 1, len(x)))
-            return ranked
+        def prefer(names: List[str]) -> List[str]:
+            return sorted(names, key=lambda x: (0 if "regional-count" in x else 1, len(x)))
 
-        core = prefer_regional_count(core)
-        mem  = prefer_regional_count(mem)
+        core = prefer(core)
+        mem  = prefer(mem)
 
         if core:
             hits.append(core[0])
@@ -265,20 +257,103 @@ def find_limit_names_for_target(all_limit_names: Set[str], target_shape: str) ->
 
     return hits
 
-def compute_upgrade_advice(
+
+# ------------------------------------------------------------
+#  Shape catalog helpers
+# ------------------------------------------------------------
+def list_shapes_in_ad(compute_client, tenancy_id: str, ad: str) -> Set[str]:
+    """
+    AD shape catalog (offered shapes, not real-time capacity guarantee)
+    """
+    try:
+        shapes = oci.pagination.list_call_get_all_results(
+            compute_client.list_shapes,
+            compartment_id=tenancy_id,
+            availability_domain=ad
+        ).data
+        return {getattr(s, "shape", "") for s in shapes if getattr(s, "shape", "")}
+    except Exception:
+        return set()
+
+
+# ------------------------------------------------------------
+#  Shapes-only scan
+# ------------------------------------------------------------
+def scan_compartment_shapes_only(
+    comp_id: str,
+    compute_client,
+    old_shapes_set: Optional[Set[str]],
+    old_shape_regex: Optional[re.Pattern],
+    old_gen_tracker: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    findings: List[Dict[str, Any]] = []
+
+    instances = oci.pagination.list_call_get_all_results(
+        compute_client.list_instances,
+        compartment_id=comp_id
+    ).data
+
+    for inst in instances:
+        shape = getattr(inst, "shape", "") or ""
+        match = False
+        if old_shapes_set is not None:
+            match = shape in old_shapes_set
+        elif old_shape_regex is not None:
+            match = bool(old_shape_regex.match(shape))
+
+        if not match:
+            continue
+
+        # Try to capture AD (some SDK summaries may miss it; fallback to get_instance)
+        ad = getattr(inst, "availability_domain", None)
+        if not ad:
+            try:
+                full = compute_client.get_instance(inst.id).data
+                ad = getattr(full, "availability_domain", None)
+            except Exception:
+                ad = None
+
+        lifecycle = getattr(inst, "lifecycle_state", None)
+        name = getattr(inst, "display_name", inst.id)
+        ocid = getattr(inst, "id", None)
+
+        old_gen_tracker.append({
+            "name": name,
+            "shape": shape,
+            "availability_domain": ad,
+            "compartment_id": comp_id,
+            "lifecycle_state": lifecycle,
+            "ocid": ocid,
+        })
+
+        # Findings row (used for CSV mainly)
+        findings.append({
+            "ResourceName": name,
+            "ResourceType": "ComputeInstance",
+            "CompartmentId": comp_id,
+            "Issue": f"Old-gen Shape ({shape})",
+            "RiskLevel": risk_for_shape(shape),
+            "CostEstimate": "Varies",
+            "AdditionalInfo": f"Shape: {shape}, Lifecycle: {lifecycle}, OCID: {ocid}",
+            "FreeformTags": getattr(inst, "freeform_tags", {}) or {},
+            "DefinedTags": getattr(inst, "defined_tags", {}) or {},
+        })
+
+    return findings
+
+
+# ------------------------------------------------------------
+#  Upgrade advisor (global section + per-instance evaluation)
+# ------------------------------------------------------------
+def compute_upgrade_advice_summary(
     old_gen_tracker: List[Dict[str, Any]],
     compute_client,
     limits_client,
-    root_compartment_id: str,
     tenancy_id: str,
     availability_domains: List[str],
 ) -> Dict[str, Any]:
     """
-    Returns a dict for HTML rendering:
-      - counts per family
-      - recommended targets
-      - per-AD catalog flags
-      - per-limit service limit + used + available + effective quota
+    Summary block for HTML header section (counts + catalog + limits list)
     """
     counts = Counter()
     ads_seen: Set[str] = set()
@@ -288,13 +363,29 @@ def compute_upgrade_advice(
         ad = row.get("availability_domain")
         if ad:
             ads_seen.add(ad)
-        counts[classify_old_shape(shape)] += 1
 
-    # explicit zeros
-    for k in ["AMD_E2", "AMD_E3", "AMD_E4", "INTEL_STD1", "INTEL_STD2"]:
+        if re.match(r"^VM\.Standard\.E2\b", shape):
+            counts["AMD_E2"] += 1
+        elif re.match(r"^VM\.Standard\.E3\b", shape):
+            counts["AMD_E3"] += 1
+        elif re.match(r"^VM\.Standard\.E4\b", shape):
+            counts["AMD_E4"] += 1
+        elif re.match(r"^VM\.Standard2\b", shape):
+            counts["INTEL_STD2"] += 1
+        else:
+            counts["OTHER"] += 1
+
+    for k in ["AMD_E2", "AMD_E3", "AMD_E4", "INTEL_STD2"]:
         counts.setdefault(k, 0)
 
-    targets = recommended_targets(dict(counts))
+    amd_present = (counts["AMD_E2"] + counts["AMD_E3"] + counts["AMD_E4"]) > 0
+    intel_present = counts["INTEL_STD2"] > 0
+
+    targets: List[str] = []
+    if amd_present:
+        targets.extend(AMD_UPGRADE_TARGETS)
+    if intel_present:
+        targets.extend(INTEL_UPGRADE_TARGETS)
 
     advice: Dict[str, Any] = {
         "counts": dict(counts),
@@ -303,6 +394,7 @@ def compute_upgrade_advice(
         "catalog": {},
         "limits": [],
         "compute_service": "",
+        "target_to_limits": {},  # target -> [core_limit, mem_limit]
     }
 
     if not targets:
@@ -317,20 +409,26 @@ def compute_upgrade_advice(
             "e6_series": sorted([s for s in shape_set if s.startswith("VM.Standard.E6")]),
         }
 
-    # Limits discovery
-    service_name = discover_compute_service_name(limits_client, root_compartment_id)
+    # Limits discovery: use tenancy/root like console default
+    service_name = discover_compute_service_name(limits_client, tenancy_id)
     advice["compute_service"] = service_name
 
-    limit_index = build_limit_value_index(limits_client, root_compartment_id, service_name)
+    limit_index = build_limit_value_index(limits_client, tenancy_id, service_name)
     all_limit_names = {k[0] for k in limit_index.keys() if k and k[0]}
 
-    needed_limits: Set[str] = set()
+    target_to_limits: Dict[str, List[str]] = {}
     for t in targets:
-        needed_limits.update(find_limit_names_for_target(all_limit_names, t))
+        target_to_limits[t] = find_limit_names_for_target(all_limit_names, t)
+
+    advice["target_to_limits"] = target_to_limits
+
+    # Build a compact limits table (service limit + usage + available)
+    needed_limits: Set[str] = set()
+    for t, lims in target_to_limits.items():
+        for ln in lims:
+            needed_limits.add(ln)
 
     needed_limits_sorted = sorted(needed_limits)
-
-    # pick an AD for availability calls fallback
     any_ad = advice["ads"][0] if advice["ads"] else None
 
     for limit_name in needed_limits_sorted:
@@ -351,9 +449,9 @@ def compute_upgrade_advice(
         ra = get_resource_availability_safe(
             limits_client=limits_client,
             service_name=service_name,
-            compartment_id=root_compartment_id,
+            compartment_id=tenancy_id,
             limit_name=limit_name,
-            ad=any_ad
+            availability_domain=any_ad
         ) or {}
 
         advice["limits"].append({
@@ -361,19 +459,80 @@ def compute_upgrade_advice(
             "global": global_val,
             "region": region_val,
             "ad_vals": {k: ad_vals[k] for k in sorted(ad_vals.keys())} if ad_vals else {},
-            "availability": ra,  # {available, used, effective_quota_value}
+            "availability": ra,
         })
 
     return advice
 
-def render_upgrade_advice_html(advice: Dict[str, Any]) -> str:
+
+def evaluate_upgrade_option(
+    target_shape: str,
+    instance_ad: Optional[str],
+    instance_compartment_id: str,
+    shapes_cache_by_ad: Dict[str, Set[str]],
+    target_to_limits: Dict[str, List[str]],
+    limits_client,
+    service_name: str,
+    ra_cache: Dict[Tuple[str, str, Optional[str]], Optional[Dict[str, Any]]],
+) -> Tuple[bool, str]:
+    """
+    Returns (is_ok, reason_string_for_html)
+
+    ✅ requires:
+      - target shape offered in AD catalog
+      - AND (if availability/quota info exists) not zero
+
+    If AD is unknown -> ❌ (unknown AD)
+    """
+    if not instance_ad:
+        return (False, "unknown AD")
+
+    ad_shapes = shapes_cache_by_ad.get(instance_ad, set())
+    if target_shape not in ad_shapes:
+        return (False, "not offered")
+
+    # If we don't know limit names for this target, we can only assert catalog presence
+    limit_names = target_to_limits.get(target_shape, [])
+    if not limit_names:
+        return (True, "catalog ok")
+
+    # Evaluate quota/available signals at the INSTANCE compartment level (reflects quota policy)
+    for ln in limit_names:
+        key = (instance_compartment_id, ln, instance_ad)
+        if key not in ra_cache:
+            ra_cache[key] = get_resource_availability_safe(
+                limits_client=limits_client,
+                service_name=service_name,
+                compartment_id=instance_compartment_id,
+                limit_name=ln,
+                availability_domain=instance_ad
+            )
+        ra = ra_cache[key]
+
+        # If supported, use explicit available/effective quota
+        if ra:
+            eff = ra.get("effective_quota_value", None)
+            avail = ra.get("available", None)
+
+            # If any relevant quota is 0 -> treat as ❌ (user explicitly wants to see 0s as blocking)
+            if eff == 0:
+                return (False, f"{ln} quota=0")
+            if avail == 0:
+                return (False, f"{ln} available=0")
+
+    return (True, "ok")
+
+
+# ------------------------------------------------------------
+#  HTML rendering
+# ------------------------------------------------------------
+def render_advisor_block_html(advice: Dict[str, Any]) -> str:
     if not advice:
         return ""
 
     c = advice.get("counts", {}) or {}
     amd_line = f"E2={c.get('AMD_E2',0)} | E3={c.get('AMD_E3',0)} | E4={c.get('AMD_E4',0)}"
-    intel_line = f"Standard2={c.get('INTEL_STD2',0)} (Std1={c.get('INTEL_STD1',0)})"
-
+    intel_line = f"Standard2={c.get('INTEL_STD2',0)}"
     targets: List[str] = advice.get("targets", []) or []
     ads: List[str] = advice.get("ads", []) or []
     service_name = esc(advice.get("compute_service", ""))
@@ -383,7 +542,7 @@ def render_upgrade_advice_html(advice: Dict[str, Any]) -> str:
 
     out: List[str] = []
     out.append('<div class="kingsai">')
-    out.append('<h2>👑 KING KAI — Shapes Upgrade Advisor</h2>')
+    out.append('<h2>👑 KING KAI — Upgrade Advisor</h2>')
 
     out.append('<div class="kpi-row">')
     out.append(f'<div class="kpi"><div class="kpi-title">AMD old instances</div><div class="kpi-val">{esc(amd_line)}</div></div>')
@@ -399,11 +558,10 @@ def render_upgrade_advice_html(advice: Dict[str, Any]) -> str:
     out.append('<ul>')
     if (c.get("AMD_E2", 0) + c.get("AMD_E3", 0) + c.get("AMD_E4", 0)) > 0:
         out.append(f"<li><strong>AMD →</strong> {', '.join(map(esc, AMD_UPGRADE_TARGETS))}</li>")
-    if (c.get("INTEL_STD1", 0) + c.get("INTEL_STD2", 0)) > 0:
+    if c.get("INTEL_STD2", 0) > 0:
         out.append(f"<li><strong>Intel →</strong> {', '.join(map(esc, INTEL_UPGRADE_TARGETS))}</li>")
     out.append('</ul>')
 
-    # Catalog per AD
     if ads:
         out.append('<h3>Shape catalog availability (per AD)</h3>')
         out.append('<table class="advisor-table">')
@@ -423,8 +581,7 @@ def render_upgrade_advice_html(advice: Dict[str, Any]) -> str:
             out.append("<tr>" + "".join(row) + "</tr>")
         out.append("</table>")
 
-    # Limits table (mirrors console: limit + used + available)
-    out.append('<h3>Tenant limits, usage & available</h3>')
+    out.append('<h3>Tenant limits, usage & available (console-style)</h3>')
     if service_name:
         out.append(f"<p><strong>Service:</strong> <code>{service_name}</code></p>")
 
@@ -468,83 +625,34 @@ def render_upgrade_advice_html(advice: Dict[str, Any]) -> str:
 
     out.append(
         "<p class='note'>"
-        "Note: Shape catalog presence means the shape is offered in the AD catalog; it does not guarantee real-time capacity. "
-        "Limits/usage/available reflect tenancy quotas and availability where supported."
+        "✅/❌ at instance level uses AD catalog + quota/availability signals (when supported). "
+        "Catalog presence does not guarantee real-time capacity."
         "</p>"
     )
     out.append("</div>")
     return "\n".join(out)
 
-# ------------------------------------------------------------
-#  Shapes-only scan (old shapes list or regex)
-# ------------------------------------------------------------
-def scan_compartment_shapes_only(
-    comp_id: str,
-    compute_client,
-    old_shapes_set: Optional[Set[str]],
-    old_shape_regex: Optional[re.Pattern],
-    old_gen_tracker: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    findings: List[Dict[str, Any]] = []
-
-    instances = oci.pagination.list_call_get_all_results(
-        compute_client.list_instances,
-        compartment_id=comp_id
-    ).data
-
-    for inst in instances:
-        shape = getattr(inst, "shape", "") or ""
-        match = False
-        if old_shapes_set is not None:
-            match = shape in old_shapes_set
-        elif old_shape_regex is not None:
-            match = bool(old_shape_regex.match(shape))
-
-        if match:
-            old_gen_tracker.append({
-                "name": getattr(inst, "display_name", inst.id),
-                "shape": shape,
-                "availability_domain": getattr(inst, "availability_domain", None),
-                "compartment_id": comp_id,
-                "lifecycle_state": getattr(inst, "lifecycle_state", None),
-                "ocid": getattr(inst, "id", None),
-            })
-            findings.append({
-                "ResourceName": getattr(inst, "display_name", inst.id),
-                "ResourceType": "ComputeInstance",
-                "CompartmentId": comp_id,
-                "Issue": f"Old-gen Shape ({shape})",
-                "RiskLevel": "Medium",
-                "CostEstimate": "Varies",
-                "AdditionalInfo": f"Shape: {shape}, Lifecycle: {getattr(inst,'lifecycle_state','')}, OCID: {getattr(inst,'id','')}",
-                "FreeformTags": getattr(inst, "freeform_tags", {}) or {},
-                "DefinedTags": getattr(inst, "defined_tags", {}) or {},
-            })
-
-    return findings
 
 # ------------------------------------------------------------
 #  Main
 # ------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="👑 KING KAI — OCI Forgotten Resource Detective (vNext)")
+    parser = argparse.ArgumentParser(description="👑 KING KAI — Shapes Upgrade Report")
 
     parser.add_argument("--profile", default="DEFAULT", help="OCI CLI profile name from ~/.oci/config (default: DEFAULT)")
     parser.add_argument("--output-csv", default="forgotten_resources_report.csv", help="CSV path (default: forgotten_resources_report.csv)")
     parser.add_argument("--output-html", default="forgotten_resources_report.html", help="HTML path (default: forgotten_resources_report.html)")
 
-    parser.add_argument("--scan-mode", choices=["shapes", "full"], default="shapes",
-                        help="shapes = shapes-only report (default), full = include other detectors too")
     parser.add_argument("--shapes-upgrade-report", action="store_true",
-                        help="Scan predefined old shapes (AMD E2/E3/E4 + Intel Standard2) and produce upgrade advisor. Implies shapes-only.")
+                        help="Scan predefined old shapes (AMD E2/E3/E4 + Intel Standard2) and produce upgrade advisor.")
     parser.add_argument("--old-shape-pattern", default=None,
-                        help="Optional regex to define 'old' shapes (shapes-only). If provided, overrides the predefined set.")
-
-    # (full scan options remain for future; shapes-only is your focus now)
-    parser.add_argument("--suspicious-name-regex", default=r"\b(test|temp|demo|old|backup|poc)\b",
-                        help=r"Regex for sketchy resource names (only used in full mode)")
+                        help="Optional regex to define 'old' shapes. If provided, overrides the predefined set.")
 
     args = parser.parse_args()
+
+    if not args.shapes_upgrade_report and not args.old_shape_pattern:
+        print("❌ Please run with --shapes-upgrade-report (recommended) or --old-shape-pattern <regex>.")
+        sys.exit(2)
 
     # Load OCI config
     try:
@@ -565,90 +673,101 @@ def main():
     compartments, comp_name_by_id = collect_all_compartments(identity_client, tenancy_id)
     availability_domains = list_availability_domains(identity_client, tenancy_id)
 
-    # Decide mode:
-    # - If --shapes-upgrade-report OR --old-shape-pattern is used → shapes-only HTML (your requirement #2)
-    if args.shapes_upgrade_report or args.old_shape_pattern:
-        scan_mode = "shapes"
-    else:
-        scan_mode = args.scan_mode
-
     # Shapes match configuration
-    old_shapes_set = None
-    old_shape_regex = None
+    old_shapes_set: Optional[Set[str]] = None
+    old_shape_regex: Optional[re.Pattern] = None
 
-    if scan_mode == "shapes":
-        if args.old_shape_pattern:
-            try:
-                old_shape_regex = re.compile(args.old_shape_pattern)
-            except re.error as e:
-                print(f"❌ Invalid regex for --old-shape-pattern: {e}")
-                sys.exit(1)
-        else:
-            # default requested set (covers AMD+Intel in one command)
-            old_shapes_set = set(OLD_SHAPES_SET)
+    if args.old_shape_pattern:
+        try:
+            old_shape_regex = re.compile(args.old_shape_pattern)
+        except re.error as e:
+            print(f"❌ Invalid regex for --old-shape-pattern: {e}")
+            sys.exit(1)
+    else:
+        old_shapes_set = set(OLD_SHAPES_SET)
+
+    print(f"🔍 Scanning tenancy {tenancy_id} (shapes-only)…")
+    print(f"   Compartments: {len(compartments)} (including root)")
+    print()
 
     all_findings: List[Dict[str, Any]] = []
     old_gen_tracker: List[Dict[str, Any]] = []
 
-    print(f"🔍 Scanning tenancy {tenancy_id} (mode={scan_mode}) …")
-    print(f"   Compartments: {len(compartments)} (including root)")
-    print()
-
     for comp_id in compartments:
-        if scan_mode == "shapes":
-            comp_findings = scan_compartment_shapes_only(
-                comp_id=comp_id,
-                compute_client=compute_client,
-                old_shapes_set=old_shapes_set,
-                old_shape_regex=old_shape_regex,
-                old_gen_tracker=old_gen_tracker,
-            )
-            all_findings.extend(comp_findings)
-        else:
-            # Full mode placeholder (kept for later). For now, we keep behavior simple.
-            comp_findings = scan_compartment_shapes_only(
-                comp_id=comp_id,
-                compute_client=compute_client,
-                old_shapes_set=old_shapes_set or set(OLD_SHAPES_SET),
-                old_shape_regex=old_shape_regex,
-                old_gen_tracker=old_gen_tracker,
-            )
-            all_findings.extend(comp_findings)
+        comp_findings = scan_compartment_shapes_only(
+            comp_id=comp_id,
+            compute_client=compute_client,
+            old_shapes_set=old_shapes_set,
+            old_shape_regex=old_shape_regex,
+            old_gen_tracker=old_gen_tracker,
+        )
+        all_findings.extend(comp_findings)
 
-    # Compute upgrade advice (root compartment = tenancy id in the console view)
-    upgrade_advice = compute_upgrade_advice(
+    # Summary advisor (counts + catalog + tenant limits table)
+    advice = compute_upgrade_advice_summary(
         old_gen_tracker=old_gen_tracker,
         compute_client=compute_client,
         limits_client=limits_client,
-        root_compartment_id=tenancy_id,
         tenancy_id=tenancy_id,
         availability_domains=availability_domains,
     )
 
-    # CSV
+    # Build caches for per-instance ✅/❌ evaluation
+    shapes_cache_by_ad: Dict[str, Set[str]] = {}
+    for ad in (advice.get("ads", []) or availability_domains):
+        if ad and ad not in shapes_cache_by_ad:
+            shapes_cache_by_ad[ad] = list_shapes_in_ad(compute_client, tenancy_id, ad)
+
+    service_name = advice.get("compute_service") or discover_compute_service_name(limits_client, tenancy_id)
+    target_to_limits: Dict[str, List[str]] = advice.get("target_to_limits", {}) or {}
+
+    # Cache resource availability calls: (compartment_id, limit_name, ad) -> ra
+    ra_cache: Dict[Tuple[str, str, Optional[str]], Optional[Dict[str, Any]]] = {}
+
+    # --------------- Generate CSV ----------------
     csv_path = args.output_csv
     with open(csv_path, mode="w", newline="", encoding="utf-8") as csvfile:
         fieldnames = [
-            "ResourceName", "ResourceType", "CompartmentId",
-            "Issue", "RiskLevel", "CostEstimate",
-            "AdditionalInfo", "FreeformTags", "DefinedTags"
+            "Risk", "Shape", "InstanceName", "Lifecycle", "CompartmentId", "OCID", "UpgradeOptions"
         ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
 
-        for item in all_findings:
-            row = dict(item)
-            row["FreeformTags"] = "{}" if not row.get("FreeformTags") else str(row["FreeformTags"])
-            row["DefinedTags"] = "{}" if not row.get("DefinedTags") else str(row["DefinedTags"])
-            writer.writerow(row)
+        for row in old_gen_tracker:
+            shape = row.get("shape", "")
+            risk = risk_for_shape(shape)
+            targets = upgrade_targets_for_shape(shape)
+
+            upgrades_str_parts = []
+            for t in targets:
+                ok, reason = evaluate_upgrade_option(
+                    target_shape=t,
+                    instance_ad=row.get("availability_domain"),
+                    instance_compartment_id=row.get("compartment_id", ""),
+                    shapes_cache_by_ad=shapes_cache_by_ad,
+                    target_to_limits=target_to_limits,
+                    limits_client=limits_client,
+                    service_name=service_name,
+                    ra_cache=ra_cache,
+                )
+                upgrades_str_parts.append(f"{t} [{'OK' if ok else 'NO'}:{reason}]")
+
+            writer.writerow({
+                "Risk": risk,
+                "Shape": shape,
+                "InstanceName": row.get("name", ""),
+                "Lifecycle": row.get("lifecycle_state", ""),
+                "CompartmentId": row.get("compartment_id", ""),
+                "OCID": row.get("ocid", ""),
+                "UpgradeOptions": " | ".join(upgrades_str_parts),
+            })
 
     print(f"🗒️  CSV report saved to: {csv_path}")
 
-    # HTML (shapes-only per your requirement)
+    # --------------- Generate HTML ----------------
     html_path = args.output_html
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-    advisor_html = render_upgrade_advice_html(upgrade_advice)
+    advisor_html = render_advisor_block_html(advice)
 
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
@@ -660,12 +779,13 @@ def main():
     h1 {{ color:#2c3e50; font-size:28px; margin-bottom: 6px; }}
     p {{ font-size:14px; }}
 
-    table {{ width:100%; border-collapse:collapse; margin-top:20px; }}
+    table {{ width:100%; border-collapse:collapse; margin-top:16px; }}
     th, td {{ padding:10px; border:1px solid #ddd; text-align:left; font-size:13px; vertical-align: top; }}
     th {{ background:#34495e; color:white; }}
     tr:nth-child(even) {{ background:#f2f2f2; }}
 
-    .medium {{ background: #fff4e5; }}
+    .highrow {{ background: #fdecea !important; }}   /* light red */
+    .medrow  {{ background: #fff4e5 !important; }}   /* light orange */
 
     /* Advisor */
     .kingsai {{ background:#fff; border:1px solid #e3e3e3; padding:16px; border-radius:10px; margin-top:16px; }}
@@ -678,12 +798,13 @@ def main():
     .advisor-table th {{ background:#2c3e50; color:white; }}
     .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:12px; }}
     .note {{ font-size:12px; color:#555; margin-top:10px; }}
+    .tiny {{ font-size:12px; color:#666; }}
   </style>
 </head>
 <body>
   <h1>👑 KING KAI — Shapes Upgrade Report</h1>
   <p><strong>Generated:</strong> {esc(now)}</p>
-  <p><strong>Old instances found:</strong> {len(all_findings)}</p>
+  <p><strong>Old instances found:</strong> {len(old_gen_tracker)}</p>
 
   {advisor_html}
 
@@ -691,33 +812,70 @@ def main():
   <table>
     <tr>
       <th>Risk</th>
-      <th>Instance Name</th>
       <th>Shape</th>
-      <th>Compartment</th>
+      <th>Instance Name</th>
       <th>Lifecycle</th>
+      <th>Compartment</th>
       <th>OCID</th>
+      <th>Upgrade Options</th>
     </tr>
 """
 
     for row in old_gen_tracker:
+        shape = row.get("shape", "") or ""
+        risk = risk_for_shape(shape)
+        row_class = "highrow" if risk == "High" else "medrow"
+
         comp_id = row.get("compartment_id", "")
         comp_name = comp_name_by_id.get(comp_id, "")
         comp_cell = f"{esc(comp_name)}<br/><span class='mono'>{esc(comp_id)}</span>" if comp_name else f"<span class='mono'>{esc(comp_id)}</span>"
+
+        # Build upgrade options with ✅/❌ and reason
+        targets = upgrade_targets_for_shape(shape)
+        upgrades_lines: List[str] = []
+        if not targets:
+            upgrades_lines.append("<span class='tiny'>n/a</span>")
+        else:
+            for t in targets:
+                ok, reason = evaluate_upgrade_option(
+                    target_shape=t,
+                    instance_ad=row.get("availability_domain"),
+                    instance_compartment_id=comp_id,
+                    shapes_cache_by_ad=shapes_cache_by_ad,
+                    target_to_limits=target_to_limits,
+                    limits_client=limits_client,
+                    service_name=service_name,
+                    ra_cache=ra_cache,
+                )
+                icon = "✅" if ok else "❌"
+                # Keep it readable; show reason when ❌ (or when ok but catalog-only)
+                if ok and reason == "catalog ok":
+                    upgrades_lines.append(f"{esc(t)} {icon} <span class='tiny'>(quota unknown)</span>")
+                elif ok:
+                    upgrades_lines.append(f"{esc(t)} {icon}")
+                else:
+                    upgrades_lines.append(f"{esc(t)} {icon} <span class='tiny'>({esc(reason)})</span>")
+
+        upgrades_html = "<br/>".join(upgrades_lines)
+
         html_content += f"""
-    <tr class="medium">
-      <td>Medium</td>
+    <tr class="{row_class}">
+      <td><strong>{esc(risk)}</strong></td>
+      <td class="mono">{esc(shape)}</td>
       <td>{esc(row.get('name',''))}</td>
-      <td class="mono">{esc(row.get('shape',''))}</td>
-      <td>{comp_cell}</td>
       <td>{esc(row.get('lifecycle_state',''))}</td>
+      <td>{comp_cell}</td>
       <td class="mono">{esc(row.get('ocid',''))}</td>
+      <td>{upgrades_html}</td>
     </tr>
 """
 
     html_content += """
   </table>
 
-  <p class="note">This report is shapes-only (by design) when --shapes-upgrade-report or --old-shape-pattern is used.</p>
+  <p class="note">
+    Instance-level ✅/❌ is based on AD shape catalog + quota/availability signals (when supported). If a target is not offered in the AD catalog (e.g., E6 missing in a region), it will show ❌ (not offered).
+  </p>
 </body>
 </html>
 """
