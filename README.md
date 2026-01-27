@@ -23,3 +23,28 @@ What it does?
 - 🌐 **Produces an interactive HTML report** with scores, findings, and configuration details per Load Balancer.
 - 🧹 **Helps teams eliminate waste**, reduce cost, and restore balance across OCI environments.
 <img width="1401" height="905" alt="Screenshot 2026-01-20 173012" src="https://github.com/user-attachments/assets/9b8e5253-6172-4a90-beec-6d12729ea8f7" />
+
+
+### 2. 🐉 Next Gen Dicover - KING KAI 
+<img width="197" height="148" alt="image" src="https://github.com/user-attachments/assets/76fbf235-c405-4b5e-a3cc-f911f2cec3d7" />
+
+Sniffs out forgotten cloud resources in your OCI tenancy—no manual sleuthing required.
+
+Scans every compartment (including root) and flags:
+  • Orphaned Block Volumes (no attachments)
+  • Unattached Reserved Public IPs (REGION + AD scopes)
+  • Empty Network Security Groups (NSGs with zero VNICs)
+  • Load Balancers with no backends (validated via list_backends)
+  • Old-gen Compute instances (shape matches regex)
+  • Resources with absolutely NO tags
+  • Resources with sketchy names (test|temp|demo|old|backup|poc)
+
+PLUS (KING KAI Upgrade Advisor):
+  • When old shapes are found, shows:
+      - counts (AMD E2/E3/E4 + Intel Standard1/2, including zeros)
+      - recommended upgrade targets:
+          AMD  -> VM.Standard.E5.Flex and/or VM.Standard.E6.Flex
+          Intel-> VM.Standard3.Flex and VM.Optimized3.Flex
+      - per-AD shape catalog availability (✅/❌) and E5/E6 series in catalog
+      - tenancy limits snapshot (including explicit 0) + available/used when supported
+  • Included in the HTML report (very important), and also printed to console.
