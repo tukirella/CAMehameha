@@ -33,23 +33,14 @@ ________________________________________________________________________________
 ### 2. 🐉 Shape Upgrade Advisor - KING KAI 
 <img width="180" height="95" alt="image" src="https://github.com/user-attachments/assets/2f6da761-7d2a-4812-a853-1412c2ceae59" />
 
-Sniffs out forgotten cloud resources in your OCI tenancy—no manual sleuthing required.
+KING KAI helps teams modernize and optimize OCI compute by scanning all compartments to identify workloads still running on legacy AMD (E2/E3/E4) and legacy Intel (Standard2) shapes, and then validating whether the recommended next-gen upgrade targets are actually available for the tenancy/region. **Inspired by Dragon Ball Z’s King Kai—the wise mentor** who spots inefficiencies and guides upgrades with clarity—the tool summarizes risk, sizing (oCPU/Memory), estimated baseline monthly cost, and upgrade feasibility into clean CSV + HTML reports, helping reduce waste and unblock modernization.
 
-Scans every compartment (including root) and flags:
-  • Orphaned Block Volumes (no attachments)
-  • Unattached Reserved Public IPs (REGION + AD scopes)
-  • Empty Network Security Groups (NSGs with zero VNICs)
-  • Load Balancers with no backends (validated via list_backends)
-  • Old-gen Compute instances (shape matches regex)
-  • Resources with absolutely NO tags
-  • Resources with sketchy names (test|temp|demo|old|backup|poc)
+What it does?
 
-PLUS (KING KAI Upgrade Advisor):
-  • When old shapes are found, shows:
-      - counts (AMD E2/E3/E4 + Intel Standard1/2, including zeros)
-      - recommended upgrade targets:
-          AMD  -> VM.Standard.E5.Flex and/or VM.Standard.E6.Flex
-          Intel-> VM.Standard3.Flex and VM.Optimized3.Flex
-      - per-AD shape catalog availability (✅/❌) and E5/E6 series in catalog
-      - tenancy limits snapshot (including explicit 0) + available/used when supported
-  • Included in the HTML report (very important), and also printed to console.
+- 🔍 Scans all OCI compartments to locate instances running on legacy shapes (AMD E2/E3/E4 + Intel Standard2).
+- 🧠 Classifies findings by vendor family (AMD vs Intel) and assigns Risk Level (HIGH for AMD E2 + E3, MEDIUM for others).
+- 🧾 Captures instance sizing: oCPU + Memory [GB], plus lifecycle state for quick triage.
+- ✅ Validates upgrade feasibility by checking if target shapes are available in the active region/AD and not blocked by hard quota signals.
+- 📈 Adds baseline monthly cost estimates for current shapes and potential monthly delta add-on if upgraded (E5/E6 for AMD, Standard3/Optimized3 for Intel).
+- 📄 Generates a CSV report (includes OCID + compartment details) for deeper governance, automation, and follow-up actions.
+- 🌐 Produces a clean HTML report split into two sections (AMD / Intel) for fast executive visibility and upgrade planning.
