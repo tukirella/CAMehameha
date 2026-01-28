@@ -41,7 +41,7 @@ What it does?
 - 🧠 **Classifies findings by vendor family** (AMD vs Intel) and assigns Risk Level (HIGH for AMD E2 + E3, MEDIUM for others).
 - 🧾 **Captures instance sizing**: oCPU + Memory [GB], plus lifecycle state for quick triage.
 - ✅ **Validates upgrade feasibility** by checking if target shapes are available in the active region/AD and not blocked by hard quota signals.
-- 📈 **Adds baseline monthly cost estimates** for current shapes and potential monthly delta add-on if upgraded (E5/E6 for AMD, Standard3/Optimized3 for Intel).
+- 📈 **Adds baseline monthly cost estimates** for current shapes and potential monthly delta add-on if upgraded.
 - 📄 **Generates a CSV report** (includes OCID + compartment details) for deeper governance, automation, and follow-up actions.
 - 🌐 **Produces a clean HTML report** split into two sections (AMD / Intel) for fast executive visibility and upgrade planning.
 
