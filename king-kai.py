@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-👑 KING KAI — OCI Shapes Upgrade Report (timestamped outputs, AMD/Intel split, +oCPU/Memory)
+👑 KING KAI — OCI Shapes Upgrade Report (timestamped outputs, AMD/Intel split, +Pricing from OCI Calculator baseline)
 
 Run:
   python3 oci_forgotten_resources_king_kai.py --shapes-upgrade-report
@@ -9,20 +9,32 @@ Outputs (auto-named, UTC timestamp):
   - king-kaiYYYYMMDD-HHMM.html
   - king-kaiYYYYMMDD-HHMM.csv
 
-HTML:
-  - No OCID and no compartment details
-  - Two sections:
-      AMD table columns:
-        Risk, oCPU, Memory [GB], Shape, Instance Name, Lifecycle,
-        VM.Standard.E5.Flex avail (✅/❌), VM.Standard.E6.Flex avail (✅/❌)
-      Intel table columns:
-        Risk, oCPU, Memory [GB], Shape, Instance Name, Lifecycle,
-        VM.Standard3.Flex avail (✅/❌), VM.Optimized3.Flex avail (✅/❌)
-  - Rows sorted by Shape (descending) within each table
+HTML (NO OCID/Compartment details):
+  AMD table columns (order):
+    Risk, oCPU, Memory [GB], Shape, Current Cost/mo., Instance Name, Lifecycle,
+    VM.Standard.E5.Flex avail (✅/❌), VM.Standard.E5.Flex potential delta add-on $/mo.,
+    VM.Standard.E6.Flex avail (✅/❌), VM.Standard.E6.Flex potential delta add-on $/mo.
 
-CSV:
-  - Includes OCID + compartment details for advanced use
-  - Includes oCPU + Memory [GB] columns as well
+  Intel table columns (order):
+    Risk, oCPU, Memory [GB], Shape, Current Cost/mo., Instance Name, Lifecycle,
+    VM.Standard3.Flex avail (✅/❌), VM.Standard3.Flex potential delta add-on $/mo.,
+    VM.Optimized3.Flex avail (✅/❌), VM.Optimized3.Flex potential delta add-on $/mo.
+
+Sorting:
+  - Rows are sorted by Shape (descending) within each table.
+
+CSV (includes OCID + compartment details for advanced use):
+  - Includes all HTML columns plus:
+    AvailabilityDomain, CompartmentName, CompartmentId, OCID
+
+Cost model:
+  - Baseline monthly USD taken from your OCI Calculator sheet.
+  - AMD (E2/E3/E4/E5/E6) treated as linear (base + per-oCPU + per-GB) with base 1 oCPU / 8GB.
+  - Intel Standard2.* is fixed monthly cost per preset shape.
+  - Intel Standard3.Flex / Optimized3.Flex treated as linear (base + per-oCPU + per-GB) with base 1 oCPU / 8GB.
+
+Notes:
+  - Cost numbers are baseline estimates (calculator-style). They may differ from your tenancy bill (discounts, promotions, credits, BYOL, region).
 """
 
 import oci
@@ -64,23 +76,41 @@ OPT3_TARGET = "VM.Optimized3.Flex"
 
 
 # ------------------------------------------------------------
-#  Fixed-shape memory best-effort mappings (GB)
+#  Pricing baseline (Monthly USD) — from your OCI Calculator table
 # ------------------------------------------------------------
-E2_FIXED_MEM_GB = {
-    "VM.Standard.E2.1": 8,
-    "VM.Standard.E2.2": 16,
-    "VM.Standard.E2.4": 32,
-    "VM.Standard.E2.8": 64,
+# Flex pricing model (linear): base(1 oCPU, 8GB) + (oCPU-1)*extra_oCPU + (GB-8)*extra_GB
+FLEX_BASE_OCPU = 1.0
+FLEX_BASE_MEM_GB = 8.0
+
+AMD_FLEX_PRICING = {
+    "E2": {"base": 27.0, "extra_ocpu": 14.5, "extra_gb": 1.0},
+    "E3": {"base": 27.0, "extra_ocpu": 18.0, "extra_gb": 1.0},
+    "E4": {"base": 27.0, "extra_ocpu": 20.0, "extra_gb": 1.0},
+    "E5": {"base": 34.0, "extra_ocpu": 22.5, "extra_gb": 1.5},
+    "E6": {"base": 34.0, "extra_ocpu": 22.5, "extra_gb": 1.5},
 }
 
-STD2_FIXED_MEM_GB = {
-    "VM.Standard2.1": 15,
-    "VM.Standard2.2": 30,
-    "VM.Standard2.4": 60,
-    "VM.Standard2.8": 120,
-    "VM.Standard2.16": 240,
-    # Best-effort for 24 (common linear scaling):
-    "VM.Standard2.24": 360,
+INTEL_FLEX_PRICING = {
+    "STD3": {"base": 39.0, "extra_ocpu": 30.0, "extra_gb": 1.1},
+    "OPT3": {"base": 49.0, "extra_ocpu": 40.0, "extra_gb": 1.1},
+}
+
+# Intel Standard2 fixed presets (oCPU, MemoryGB, MonthlyCostUSD)
+INTEL_STANDARD2_FIXED = {
+    "VM.Standard2.1":  {"ocpu": 1.0,  "mem_gb": 8.0,   "cost": 47.50},
+    "VM.Standard2.2":  {"ocpu": 2.0,  "mem_gb": 30.0,  "cost": 95.00},
+    "VM.Standard2.4":  {"ocpu": 4.0,  "mem_gb": 60.0,  "cost": 190.00},
+    "VM.Standard2.8":  {"ocpu": 8.0,  "mem_gb": 120.0, "cost": 380.00},
+    "VM.Standard2.16": {"ocpu": 16.0, "mem_gb": 240.0, "cost": 760.00},
+    "VM.Standard2.24": {"ocpu": 24.0, "mem_gb": 320.0, "cost": 1140.00},
+}
+
+# For AMD E2 fixed shapes (oCPU inferred from suffix; mem here aligns with typical E2 mapping)
+E2_FIXED_MEM_GB = {
+    "VM.Standard.E2.1": 8.0,
+    "VM.Standard.E2.2": 16.0,
+    "VM.Standard.E2.4": 32.0,
+    "VM.Standard.E2.8": 64.0,
 }
 
 
@@ -94,25 +124,34 @@ def esc(s: Any) -> str:
 
 
 def now_stamp_utc() -> str:
-    # Matches: king-kaiYYYYMMDD-HHMM
     return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
 
 
 def fmt_num(v: Optional[float]) -> str:
     if v is None:
         return "Unknown"
-    # Render 4.0 as 4, keep decimals otherwise
     if abs(v - int(v)) < 1e-9:
         return str(int(v))
-    return str(v)
+    return f"{v:.2f}".rstrip("0").rstrip(".")
+
+
+def fmt_money(v: Optional[float]) -> str:
+    if v is None:
+        return "Unknown"
+    return f"${v:,.2f}"
+
+
+def fmt_delta(v: Optional[float]) -> str:
+    """
+    Delta add-on: show +$X.xx if higher, -$X.xx if lower.
+    """
+    if v is None:
+        return "Unknown"
+    sign = "+" if v >= 0 else "-"
+    return f"{sign}${abs(v):,.2f}"
 
 
 def collect_all_compartments(identity_client, tenancy_id: str) -> Tuple[List[str], Dict[str, str]]:
-    """
-    Returns:
-      - compartment_ids: [tenancy_id, <all active sub-compartment OCIDs>]
-      - comp_name_by_id: { ocid: name }
-    """
     comp_ids: List[str] = []
     comp_name_by_id: Dict[str, str] = {}
 
@@ -126,7 +165,6 @@ def collect_all_compartments(identity_client, tenancy_id: str) -> Tuple[List[str
         comp_ids.append(cp.id)
         comp_name_by_id[cp.id] = getattr(cp, "name", cp.id)
 
-    # Root tenancy itself
     try:
         tenancy = identity_client.get_tenancy(tenancy_id).data
         comp_name_by_id[tenancy_id] = getattr(tenancy, "name", "tenancy-root")
@@ -174,12 +212,82 @@ def risk_for_shape(shape: str) -> str:
     return "Medium"
 
 
+# ------------------------------------------------------------
+#  Cost engine (baseline from your calculator)
+# ------------------------------------------------------------
+def linear_flex_cost(model: Dict[str, float], ocpu: Optional[float], mem_gb: Optional[float]) -> Optional[float]:
+    if ocpu is None or mem_gb is None:
+        return None
+    base = model["base"]
+    extra_ocpu = model["extra_ocpu"]
+    extra_gb = model["extra_gb"]
+
+    # linear extrapolation (do not clamp; allows fractional values if present)
+    cost = base + (ocpu - FLEX_BASE_OCPU) * extra_ocpu + (mem_gb - FLEX_BASE_MEM_GB) * extra_gb
+    return round(cost, 2)
+
+
+def current_monthly_cost(shape: str, ocpu: Optional[float], mem_gb: Optional[float]) -> Optional[float]:
+    # Intel Standard2 fixed presets
+    if shape in INTEL_STANDARD2_FIXED:
+        return float(INTEL_STANDARD2_FIXED[shape]["cost"])
+
+    # AMD old families
+    if re.match(r"^VM\.Standard\.E2\.\d+$", shape):
+        return linear_flex_cost(AMD_FLEX_PRICING["E2"], ocpu, mem_gb)
+
+    if shape == "VM.Standard.E3.Flex":
+        return linear_flex_cost(AMD_FLEX_PRICING["E3"], ocpu, mem_gb)
+
+    if shape == "VM.Standard.E4.Flex":
+        return linear_flex_cost(AMD_FLEX_PRICING["E4"], ocpu, mem_gb)
+
+    # If user runs regex and matches newer shapes too (best-effort):
+    if shape == "VM.Standard.E5.Flex":
+        return linear_flex_cost(AMD_FLEX_PRICING["E5"], ocpu, mem_gb)
+
+    if shape == "VM.Standard.E6.Flex":
+        return linear_flex_cost(AMD_FLEX_PRICING["E6"], ocpu, mem_gb)
+
+    if shape == "VM.Standard3.Flex":
+        return linear_flex_cost(INTEL_FLEX_PRICING["STD3"], ocpu, mem_gb)
+
+    if shape == "VM.Optimized3.Flex":
+        return linear_flex_cost(INTEL_FLEX_PRICING["OPT3"], ocpu, mem_gb)
+
+    return None
+
+
+def target_monthly_cost(target_shape: str, ocpu: Optional[float], mem_gb: Optional[float]) -> Optional[float]:
+    if target_shape == E5_TARGET:
+        return linear_flex_cost(AMD_FLEX_PRICING["E5"], ocpu, mem_gb)
+    if target_shape == E6_TARGET:
+        return linear_flex_cost(AMD_FLEX_PRICING["E6"], ocpu, mem_gb)
+    if target_shape == STD3_TARGET:
+        return linear_flex_cost(INTEL_FLEX_PRICING["STD3"], ocpu, mem_gb)
+    if target_shape == OPT3_TARGET:
+        return linear_flex_cost(INTEL_FLEX_PRICING["OPT3"], ocpu, mem_gb)
+    return None
+
+
+# ------------------------------------------------------------
+#  Infer oCPU & Memory (GB) from instance
+# ------------------------------------------------------------
 def infer_ocpu_mem(shape: str, shape_config: Optional[Any]) -> Tuple[Optional[float], Optional[float]]:
-    """
-    Returns (ocpus, memory_gb).
-    - For Flex shapes: use shape_config.ocpus and shape_config.memory_in_gbs when available
-    - For fixed E2/Standard2: infer from known mappings
-    """
+    # Standard2 fixed presets from table
+    if shape in INTEL_STANDARD2_FIXED:
+        e = INTEL_STANDARD2_FIXED[shape]
+        return float(e["ocpu"]), float(e["mem_gb"])
+
+    # AMD E2 fixed
+    if shape in E2_FIXED_MEM_GB:
+        try:
+            ocpu = float(shape.split(".")[-1])
+        except Exception:
+            ocpu = None
+        return ocpu, float(E2_FIXED_MEM_GB[shape])
+
+    # Flex shapes: use shape_config
     if shape_config is not None:
         ocpus = getattr(shape_config, "ocpus", None)
         mem = getattr(shape_config, "memory_in_gbs", None)
@@ -189,31 +297,13 @@ def infer_ocpu_mem(shape: str, shape_config: Optional[Any]) -> Tuple[Optional[fl
             except Exception:
                 pass
 
-    if shape in E2_FIXED_MEM_GB:
-        try:
-            ocpu = float(shape.split(".")[-1])
-        except Exception:
-            ocpu = None
-        return ocpu, float(E2_FIXED_MEM_GB.get(shape))
-
-    if shape in STD2_FIXED_MEM_GB:
-        try:
-            ocpu = float(shape.split(".")[-1])
-        except Exception:
-            ocpu = None
-        return ocpu, float(STD2_FIXED_MEM_GB.get(shape))
-
     return None, None
 
 
 # ------------------------------------------------------------
-#  Limits helpers (console-style signals)
+#  Limits helpers (availability signals)
 # ------------------------------------------------------------
 def discover_compute_service_name(limits_client, compartment_id: str) -> str:
-    """
-    Limits service uses a service_name string (often 'compute').
-    Best-effort discovery.
-    """
     try:
         svcs = oci.pagination.list_call_get_all_results(
             limits_client.list_services,
@@ -231,11 +321,8 @@ def discover_compute_service_name(limits_client, compartment_id: str) -> str:
     return "compute"
 
 
-def build_limit_value_index(limits_client, compartment_id: str, service_name: str) -> Dict[Tuple[str, str, Optional[str]], Any]:
-    """
-    index[(limit_name, scope_type, availability_domain)] = value
-    """
-    index: Dict[Tuple[str, str, Optional[str]], Any] = {}
+def build_limit_value_index(limits_client, compartment_id: str, service_name: str) -> Set[str]:
+    names: Set[str] = set()
     try:
         vals = oci.pagination.list_call_get_all_results(
             limits_client.list_limit_values,
@@ -243,15 +330,12 @@ def build_limit_value_index(limits_client, compartment_id: str, service_name: st
             service_name=service_name
         ).data
         for lv in vals:
-            key = (
-                getattr(lv, "name", None),
-                getattr(lv, "scope_type", None),
-                getattr(lv, "availability_domain", None),
-            )
-            index[key] = getattr(lv, "value", None)
+            n = getattr(lv, "name", None)
+            if n:
+                names.add(str(n))
     except Exception:
         pass
-    return index
+    return names
 
 
 def get_resource_availability_safe(
@@ -261,9 +345,6 @@ def get_resource_availability_safe(
     limit_name: str,
     availability_domain: Optional[str],
 ) -> Optional[Dict[str, Any]]:
-    """
-    Try to fetch used/available/effective_quota_value (region first, then AD).
-    """
     try:
         ra = limits_client.get_resource_availability(
             service_name=service_name,
@@ -295,10 +376,6 @@ def get_resource_availability_safe(
 
 
 def find_limit_names_for_target(all_limit_names: Set[str], target_shape: str) -> List[str]:
-    """
-    Dynamically find the correct limit names for each target shape family.
-    We pick 1 core + 1 memory limit where possible.
-    """
     if target_shape == E5_TARGET:
         prefixes = ["standard-e5"]
     elif target_shape == E6_TARGET:
@@ -333,9 +410,6 @@ def find_limit_names_for_target(all_limit_names: Set[str], target_shape: str) ->
 #  Shape catalog helpers
 # ------------------------------------------------------------
 def list_shapes_in_ad(compute_client, tenancy_id: str, ad: str) -> Set[str]:
-    """
-    AD shape catalog (offered shapes, not real-time capacity guarantee)
-    """
     try:
         shapes = oci.pagination.list_call_get_all_results(
             compute_client.list_shapes,
@@ -357,12 +431,6 @@ def evaluate_upgrade_option(
     service_name: str,
     ra_cache: Dict[Tuple[str, str, Optional[str]], Optional[Dict[str, Any]]],
 ) -> bool:
-    """
-    ✅ if:
-      - AD known
-      - target shape offered in AD catalog
-      - AND if quota signals exist, they are not explicitly 0
-    """
     if not instance_ad:
         return False
 
@@ -372,7 +440,7 @@ def evaluate_upgrade_option(
 
     limit_names = target_to_limits.get(target_shape, [])
     if not limit_names:
-        return True  # catalog ok
+        return True
 
     for ln in limit_names:
         key = (instance_compartment_id, ln, instance_ad)
@@ -395,7 +463,7 @@ def evaluate_upgrade_option(
 
 
 # ------------------------------------------------------------
-#  Scan: shapes-only
+#  Scan: shapes-only (and enrich with costs & deltas)
 # ------------------------------------------------------------
 def scan_compartment_shapes_only(
     comp_id: str,
@@ -421,7 +489,6 @@ def scan_compartment_shapes_only(
         if not match:
             continue
 
-        # Enrich with get_instance to reliably get AD + shape_config
         ad = getattr(inst, "availability_domain", None)
         lifecycle = getattr(inst, "lifecycle_state", None)
         name = getattr(inst, "display_name", inst.id)
@@ -438,6 +505,7 @@ def scan_compartment_shapes_only(
             pass
 
         ocpus, mem_gb = infer_ocpu_mem(shape, shape_config)
+        cur_cost = current_monthly_cost(shape, ocpus, mem_gb)
 
         out_rows.append({
             "name": name,
@@ -450,6 +518,7 @@ def scan_compartment_shapes_only(
             "category": "AMD" if is_amd_old(shape) else ("Intel" if is_intel_old(shape) else "Other"),
             "ocpus": ocpus,
             "mem_gb": mem_gb,
+            "current_cost": cur_cost,
         })
 
 
@@ -466,27 +535,35 @@ def html_table_amd(rows: List[Dict[str, Any]]) -> str:
         "<th>oCPU</th>"
         "<th>Memory [GB]</th>"
         "<th>Shape</th>"
+        "<th>Current Cost/mo.</th>"
         "<th>Instance Name</th>"
         "<th>Lifecycle</th>"
         f"<th>{esc(E5_TARGET)} avail</th>"
+        f"<th>{esc(E5_TARGET)} delta add-on $/mo.</th>"
         f"<th>{esc(E6_TARGET)} avail</th>"
+        f"<th>{esc(E6_TARGET)} delta add-on $/mo.</th>"
         "</tr>"
     )
+
     for r in rows:
         risk = r["risk"]
         row_class = "highrow" if risk == "High" else "medrow"
         out.append(
             f"<tr class='{row_class}'>"
             f"<td><strong>{esc(risk)}</strong></td>"
-            f"<td style='text-align:right'>{esc(fmt_num(r.get('ocpus')))}</td>"
-            f"<td style='text-align:right'>{esc(fmt_num(r.get('mem_gb')))}</td>"
+            f"<td class='num'>{esc(fmt_num(r.get('ocpus')))}</td>"
+            f"<td class='num'>{esc(fmt_num(r.get('mem_gb')))}</td>"
             f"<td class='mono'>{esc(r['shape'])}</td>"
+            f"<td class='num'>{esc(fmt_money(r.get('current_cost')))}</td>"
             f"<td>{esc(r['name'])}</td>"
             f"<td>{esc(r.get('lifecycle_state',''))}</td>"
-            f"<td style='text-align:center'>{esc(r.get('e5_icon','❌'))}</td>"
-            f"<td style='text-align:center'>{esc(r.get('e6_icon','❌'))}</td>"
+            f"<td class='center'>{esc(r.get('e5_icon','❌'))}</td>"
+            f"<td class='num'>{esc(fmt_delta(r.get('e5_delta')))}</td>"
+            f"<td class='center'>{esc(r.get('e6_icon','❌'))}</td>"
+            f"<td class='num'>{esc(fmt_delta(r.get('e6_delta')))}</td>"
             "</tr>"
         )
+
     out.append("</table>")
     return "\n".join(out)
 
@@ -501,27 +578,35 @@ def html_table_intel(rows: List[Dict[str, Any]]) -> str:
         "<th>oCPU</th>"
         "<th>Memory [GB]</th>"
         "<th>Shape</th>"
+        "<th>Current Cost/mo.</th>"
         "<th>Instance Name</th>"
         "<th>Lifecycle</th>"
         f"<th>{esc(STD3_TARGET)} avail</th>"
+        f"<th>{esc(STD3_TARGET)} delta add-on $/mo.</th>"
         f"<th>{esc(OPT3_TARGET)} avail</th>"
+        f"<th>{esc(OPT3_TARGET)} delta add-on $/mo.</th>"
         "</tr>"
     )
+
     for r in rows:
         risk = r["risk"]
         row_class = "highrow" if risk == "High" else "medrow"
         out.append(
             f"<tr class='{row_class}'>"
             f"<td><strong>{esc(risk)}</strong></td>"
-            f"<td style='text-align:right'>{esc(fmt_num(r.get('ocpus')))}</td>"
-            f"<td style='text-align:right'>{esc(fmt_num(r.get('mem_gb')))}</td>"
+            f"<td class='num'>{esc(fmt_num(r.get('ocpus')))}</td>"
+            f"<td class='num'>{esc(fmt_num(r.get('mem_gb')))}</td>"
             f"<td class='mono'>{esc(r['shape'])}</td>"
+            f"<td class='num'>{esc(fmt_money(r.get('current_cost')))}</td>"
             f"<td>{esc(r['name'])}</td>"
             f"<td>{esc(r.get('lifecycle_state',''))}</td>"
-            f"<td style='text-align:center'>{esc(r.get('std3_icon','❌'))}</td>"
-            f"<td style='text-align:center'>{esc(r.get('opt3_icon','❌'))}</td>"
+            f"<td class='center'>{esc(r.get('std3_icon','❌'))}</td>"
+            f"<td class='num'>{esc(fmt_delta(r.get('std3_delta')))}</td>"
+            f"<td class='center'>{esc(r.get('opt3_icon','❌'))}</td>"
+            f"<td class='num'>{esc(fmt_delta(r.get('opt3_delta')))}</td>"
             "</tr>"
         )
+
     out.append("</table>")
     return "\n".join(out)
 
@@ -530,7 +615,7 @@ def html_table_intel(rows: List[Dict[str, Any]]) -> str:
 #  Main
 # ------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="👑 KING KAI — Shapes Upgrade Report (+oCPU/Memory, timestamped, AMD/Intel split, no costs)")
+    parser = argparse.ArgumentParser(description="👑 KING KAI — Shapes Upgrade Report (+oCPU/Memory + Costs/Deltas from OCI Calculator baseline)")
 
     parser.add_argument("--profile", default="DEFAULT", help="OCI CLI profile name from ~/.oci/config (default: DEFAULT)")
     parser.add_argument("--output-dir", default=".", help="Directory to write reports (default: current directory)")
@@ -564,8 +649,9 @@ def main():
 
     stamp = now_stamp_utc()
     base_name = f"king-kai{stamp}"
-    csv_path = f"{args.output_dir.rstrip('/')}/{base_name}.csv"
-    html_path = f"{args.output_dir.rstrip('/')}/{base_name}.html"
+    out_dir = args.output_dir.rstrip("/")
+    csv_path = f"{out_dir}/{base_name}.csv"
+    html_path = f"{out_dir}/{base_name}.html"
 
     compartments, comp_name_by_id = collect_all_compartments(identity_client, tenancy_id)
     availability_domains = list_availability_domains(identity_client, tenancy_id)
@@ -605,43 +691,58 @@ def main():
         shapes_cache_by_ad[ad] = list_shapes_in_ad(compute_client, tenancy_id, ad)
 
     service_name = discover_compute_service_name(limits_client, tenancy_id)
-    limit_index = build_limit_value_index(limits_client, tenancy_id, service_name)
-    all_limit_names = {k[0] for k in limit_index.keys() if k and k[0]}
+    all_limit_names = build_limit_value_index(limits_client, tenancy_id, service_name)
 
     targets = [E5_TARGET, E6_TARGET, STD3_TARGET, OPT3_TARGET]
     target_to_limits: Dict[str, List[str]] = {t: find_limit_names_for_target(all_limit_names, t) for t in targets}
-
     ra_cache: Dict[Tuple[str, str, Optional[str]], Optional[Dict[str, Any]]] = {}
 
-    # Compute per-instance icons
+    # Compute availability + deltas per instance
     for r in all_rows:
         ad = r.get("availability_domain")
         comp_id = r.get("compartment_id", "")
+        ocpu = r.get("ocpus")
+        mem_gb = r.get("mem_gb")
+        cur_cost = r.get("current_cost")
 
-        if is_amd_old(r["shape"]):
+        # AMD old -> E5/E6
+        if r.get("category") == "AMD":
             e5_ok = evaluate_upgrade_option(E5_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, limits_client, service_name, ra_cache)
             e6_ok = evaluate_upgrade_option(E6_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, limits_client, service_name, ra_cache)
             r["e5_icon"] = "✅" if e5_ok else "❌"
             r["e6_icon"] = "✅" if e6_ok else "❌"
 
-        if is_intel_old(r["shape"]):
+            e5_cost = target_monthly_cost(E5_TARGET, ocpu, mem_gb)
+            e6_cost = target_monthly_cost(E6_TARGET, ocpu, mem_gb)
+            r["e5_delta"] = round(e5_cost - cur_cost, 2) if (e5_cost is not None and cur_cost is not None) else None
+            r["e6_delta"] = round(e6_cost - cur_cost, 2) if (e6_cost is not None and cur_cost is not None) else None
+
+        # Intel old -> Standard3/Optimized3
+        if r.get("category") == "Intel":
             std3_ok = evaluate_upgrade_option(STD3_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, limits_client, service_name, ra_cache)
             opt3_ok = evaluate_upgrade_option(OPT3_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, limits_client, service_name, ra_cache)
             r["std3_icon"] = "✅" if std3_ok else "❌"
             r["opt3_icon"] = "✅" if opt3_ok else "❌"
 
+            std3_cost = target_monthly_cost(STD3_TARGET, ocpu, mem_gb)
+            opt3_cost = target_monthly_cost(OPT3_TARGET, ocpu, mem_gb)
+            r["std3_delta"] = round(std3_cost - cur_cost, 2) if (std3_cost is not None and cur_cost is not None) else None
+            r["opt3_delta"] = round(opt3_cost - cur_cost, 2) if (opt3_cost is not None and cur_cost is not None) else None
+
     # Split + sort for HTML (Shape descending)
-    amd_rows = sorted([r for r in all_rows if r["category"] == "AMD"], key=lambda x: x["shape"], reverse=True)
-    intel_rows = sorted([r for r in all_rows if r["category"] == "Intel"], key=lambda x: x["shape"], reverse=True)
+    amd_rows = sorted([r for r in all_rows if r.get("category") == "AMD"], key=lambda x: x.get("shape", ""), reverse=True)
+    intel_rows = sorted([r for r in all_rows if r.get("category") == "Intel"], key=lambda x: x.get("shape", ""), reverse=True)
 
     # --------------- Generate CSV (keeps OCID + compartment details) ----------------
     with open(csv_path, mode="w", newline="", encoding="utf-8") as csvfile:
         fieldnames = [
-            "Category", "Risk", "oCPU", "MemoryGB", "Shape", "InstanceName", "Lifecycle",
+            "Category", "Risk", "oCPU", "MemoryGB", "Shape", "CurrentCostMo", "InstanceName", "Lifecycle",
             "AvailabilityDomain",
             "CompartmentName", "CompartmentId", "OCID",
-            f"{E5_TARGET}_avail", f"{E6_TARGET}_avail",
-            f"{STD3_TARGET}_avail", f"{OPT3_TARGET}_avail",
+            f"{E5_TARGET}_avail", f"{E5_TARGET}_delta_addon",
+            f"{E6_TARGET}_avail", f"{E6_TARGET}_delta_addon",
+            f"{STD3_TARGET}_avail", f"{STD3_TARGET}_delta_addon",
+            f"{OPT3_TARGET}_avail", f"{OPT3_TARGET}_delta_addon",
         ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
@@ -654,6 +755,7 @@ def main():
                 "oCPU": fmt_num(r.get("ocpus")),
                 "MemoryGB": fmt_num(r.get("mem_gb")),
                 "Shape": r.get("shape", ""),
+                "CurrentCostMo": fmt_money(r.get("current_cost")),
                 "InstanceName": r.get("name", ""),
                 "Lifecycle": r.get("lifecycle_state", ""),
                 "AvailabilityDomain": r.get("availability_domain", ""),
@@ -661,15 +763,20 @@ def main():
                 "CompartmentId": comp_id,
                 "OCID": r.get("ocid", ""),
                 f"{E5_TARGET}_avail": r.get("e5_icon", ""),
+                f"{E5_TARGET}_delta_addon": fmt_delta(r.get("e5_delta")) if r.get("category") == "AMD" else "",
                 f"{E6_TARGET}_avail": r.get("e6_icon", ""),
+                f"{E6_TARGET}_delta_addon": fmt_delta(r.get("e6_delta")) if r.get("category") == "AMD" else "",
                 f"{STD3_TARGET}_avail": r.get("std3_icon", ""),
+                f"{STD3_TARGET}_delta_addon": fmt_delta(r.get("std3_delta")) if r.get("category") == "Intel" else "",
                 f"{OPT3_TARGET}_avail": r.get("opt3_icon", ""),
+                f"{OPT3_TARGET}_delta_addon": fmt_delta(r.get("opt3_delta")) if r.get("category") == "Intel" else "",
             })
 
     print(f"🗒️ CSV report saved to: {csv_path}")
 
     # --------------- Generate HTML (no OCID + no compartment details) ----------------
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -698,7 +805,10 @@ def main():
   <h1>👑 KING KAI — Shapes Upgrade Report</h1>
   <p><strong>Generated:</strong> {esc(generated)}</p>
   <p><strong>AMD old instances:</strong> {len(amd_rows)} &nbsp; | &nbsp; <strong>Intel old instances:</strong> {len(intel_rows)}</p>
-  <p class="note">HTML excludes OCID + compartment details. Use the CSV for advanced operations.</p>
+  <p class="note">
+    HTML excludes OCID + compartment details. Use the CSV for advanced operations.<br/>
+    Costs are baseline monthly USD estimates from OCI Calculator-style table (may differ from actual tenancy billing).
+  </p>
 
   {html_table_amd(amd_rows) if amd_rows else "<h2>AMD instances</h2><p class='note'>No AMD old instances found.</p>"}
   {html_table_intel(intel_rows) if intel_rows else "<h2>Intel instances</h2><p class='note'>No Intel old instances found.</p>"}
