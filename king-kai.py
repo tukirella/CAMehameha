@@ -9,15 +9,19 @@ Outputs (auto-named, UTC timestamp):
   - king-kaiYYYYMMDD-HHMM.html
   - king-kaiYYYYMMDD-HHMM.csv
 
-Updates included (this week):
-  1) Rename column "VM.Standard.E5/E6.Flex delta add-on $/mo." -> "E5/E6.Flex monthly add-on"
-     (HTML + CSV)
-  2) CSV availability icons are Y/N (instead of ✅/❌).
-  3) HTML sorting: Risk ascending (Critical -> High -> Medium) within each table,
-     then Shape descending (to keep shape grouping readable).
-  4) HTML "Creator" formatting:
-     - If creator looks like "default/<user>" or "Default/<user>" => show only "<user>"
-     - If creator looks like an OCID (ocid1...) or service principal/process => keep full string
+This week's updates:
+  1) Column rename in HTML+CSV: "E5/E6.Flex monthly add-on"
+  2) CSV availability is Y/N (instead of ✅/❌)
+  3) HTML sorting: Risk ascending (Critical -> High -> Medium), then Shape descending, then Instance name
+  4) HTML Creator cleanup:
+     - removes "default/" and any "domain-like" path before the user (keeps only the final username part)
+     - keeps full creator string if it's an OCID (ocid1...) or looks like a service/principal/process
+  5) Progress visibility: prints each compartment being scanned + findings count per compartment
+
+Important:
+  - "Creator" is best-effort from tags (createdBy/creator/owner...). If missing, shows "Unknown".
+  - Costs are baseline monthly USD estimates based on your Jan-2026 OCI Calculator table.
+  - Availability checks are best-effort: shape catalog + quota signals (when accessible).
 """
 
 import oci
@@ -56,6 +60,8 @@ E5_TARGET = "VM.Standard.E5.Flex"
 E6_TARGET = "VM.Standard.E6.Flex"
 STD3_TARGET = "VM.Standard3.Flex"
 OPT3_TARGET = "VM.Optimized3.Flex"
+
+RISK_ORDER = {"Critical": 0, "High": 1, "Medium": 2}
 
 
 # ------------------------------------------------------------
@@ -130,12 +136,8 @@ def fmt_delta(v: Optional[float]) -> str:
     return f"{sign}${abs(v):,.2f}"
 
 
-def bool_to_yn(v: Any) -> str:
+def bool_to_yn(v: bool) -> str:
     return "Y" if v else "N"
-
-
-def icon_to_bool(icon: str) -> bool:
-    return icon == "✅"
 
 
 def collect_all_compartments(identity_client, tenancy_id: str) -> Tuple[List[str], Dict[str, str]]:
@@ -152,6 +154,7 @@ def collect_all_compartments(identity_client, tenancy_id: str) -> Tuple[List[str
         comp_ids.append(cp.id)
         comp_name_by_id[cp.id] = getattr(cp, "name", cp.id)
 
+    # Root / tenancy name
     try:
         tenancy = identity_client.get_tenancy(tenancy_id).data
         comp_name_by_id[tenancy_id] = getattr(tenancy, "name", "tenancy-root")
@@ -208,28 +211,45 @@ def get_creator_from_tags(freeform: Optional[Dict[str, Any]], defined: Optional[
 def creator_for_html(creator: str) -> str:
     """
     Requirement:
-      - If it's "default/<user>" => show just "<user>"
-      - If it's an OCID (ocid1...) or service/process => keep full string
+      - remove "default/" and domain-ish path for human users
+      - keep full string for OCIDs or principals/services/processes
+
+    Examples:
+      "default/omri.moas"                         -> "omri.moas"
+      "Default/IdentityDomain/omri.moas"          -> "omri.moas"
+      "default\\IdentityDomain\\omri.moas"        -> "omri.moas"
+      "ocid1.user.oc1..aaaa..."                   -> keep full
+      "instanceprincipal/..." / "resourceprincipal/..." -> keep full
     """
     if not creator or creator == "Unknown":
         return "Unknown"
 
     c = creator.strip()
 
-    # keep full if OCID
+    # Keep full if OCID
     if c.lower().startswith("ocid1."):
         return c
 
-    # keep full if looks like service/process
-    if any(tok in c.lower() for tok in ["instanceprincipal", "resourceprincipal", "service", "automation", "pipeline", "oci", "oracle", "process"]):
+    # Keep full if looks like a principal/service/process
+    low = c.lower()
+    if any(tok in low for tok in ["instanceprincipal", "resourceprincipal", "principal", "serviceaccount", "automation", "pipeline", "process"]):
         return c
 
-    # remove default/ prefix (case-insensitive)
-    m = re.match(r"^(default/)(.+)$", c, flags=re.IGNORECASE)
-    if m:
-        return m.group(2)
+    # Normalize separators to "/" and remove surrounding spaces
+    norm = re.sub(r"\s+", "", c)
+    norm = norm.replace("\\", "/").replace("|", "/").replace(":", "/")
 
-    return c
+    # Strip leading "default/" (case-insensitive) if present
+    norm = re.sub(r"^default/", "", norm, flags=re.IGNORECASE)
+
+    # If still has path segments, keep only the LAST segment for human users
+    parts = [p for p in norm.split("/") if p]
+    if parts:
+        return parts[-1]
+
+    # Fallback: if weird formatting, return original minus obvious "default/" prefix patterns
+    fallback = re.sub(r"^\s*default\s*[/\\:|]\s*", "", c, flags=re.IGNORECASE)
+    return fallback.strip() or c
 
 
 # ------------------------------------------------------------
@@ -260,9 +280,6 @@ def risk_for_shape(shape: str) -> str:
     if shape == "VM.Standard.E3.Flex":
         return "High"
     return "Medium"
-
-
-RISK_ORDER = {"Critical": 0, "High": 1, "Medium": 2}
 
 
 # ------------------------------------------------------------
@@ -497,7 +514,12 @@ def scan_compartment_shapes_only(
     comp_id: str,
     compute_client,
     out_rows: List[Dict[str, Any]],
-) -> None:
+) -> int:
+    """
+    Returns how many instances matched in this compartment.
+    """
+    before = len(out_rows)
+
     instances = oci.pagination.list_call_get_all_results(
         compute_client.list_instances,
         compartment_id=comp_id
@@ -545,6 +567,8 @@ def scan_compartment_shapes_only(
             "current_cost": cur_cost,
             "creator": creator,
         })
+
+    return len(out_rows) - before
 
 
 # ------------------------------------------------------------
@@ -644,6 +668,17 @@ def html_table_intel(rows: List[Dict[str, Any]]) -> str:
     return "\n".join(out)
 
 
+def sort_rows_for_html(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Requirement: Critical first, then High, then Medium (ascending risk).
+    Keep it readable: within each risk bucket, sort by shape (desc), then by instance name.
+    """
+    rows2 = sorted(rows, key=lambda x: x.get("name", ""))
+    rows2 = sorted(rows2, key=lambda x: x.get("shape", ""), reverse=True)
+    rows2 = sorted(rows2, key=lambda x: RISK_ORDER.get(x.get("risk", "Medium"), 9))
+    return rows2
+
+
 # ------------------------------------------------------------
 #  Main
 # ------------------------------------------------------------
@@ -677,13 +712,30 @@ def main():
     compartments, comp_name_by_id = collect_all_compartments(identity_client, tenancy_id)
     availability_domains = list_availability_domains(identity_client, tenancy_id)
 
-    print(f"🔍 KING KAI scanning tenancy {tenancy_id} (legacy shapes only)…")
-    print(f"   Compartments: {len(compartments)} (including root)")
-    print()
+    print(f"👑 KING KAI scanning tenancy: {tenancy_id}")
+    print(f"📦 Compartments to scan: {len(compartments)} (including root)")
+    print(f"🧠 Legacy shapes tracked: {len(OLD_SHAPES_SET)}")
+    print("-" * 70)
 
     all_rows: List[Dict[str, Any]] = []
-    for comp_id in compartments:
-        scan_compartment_shapes_only(comp_id, compute_client, all_rows)
+    total = len(compartments)
+
+    # Progress: scan each compartment visibly
+    for idx, comp_id in enumerate(compartments, start=1):
+        cname = comp_name_by_id.get(comp_id, comp_id)
+        print(f"[{idx:>3}/{total}] Scanning compartment: {cname} ({comp_id}) ... ", end="", flush=True)
+        found = 0
+        try:
+            found = scan_compartment_shapes_only(comp_id, compute_client, all_rows)
+            print(f"done (found {found})", flush=True)
+        except oci.exceptions.ServiceError as e:
+            print(f"skipped (ServiceError: {e.status})", flush=True)
+        except Exception as e:
+            print(f"skipped (Error: {e})", flush=True)
+
+    print("-" * 70)
+    print(f"✅ Scan complete. Total old instances found: {len(all_rows)}")
+    print()
 
     # Executive counts
     amd_counts = {"E2": 0, "E3": 0, "E4": 0}
@@ -744,31 +796,15 @@ def main():
             candidates = [d for d in [std3_delta, opt3_delta] if d is not None]
             r["best_intel_delta"] = min(candidates) if candidates else None
 
-    # Sorting (HTML): Risk asc (Critical->High->Medium), then Shape desc, then Instance name
-    def sort_key(r: Dict[str, Any]):
-        return (RISK_ORDER.get(r.get("risk", "Medium"), 9), -(hash(r.get("shape","")) % (10**9)), r.get("shape",""), r.get("name",""))
-
-    # Better stable sort: use risk order, then shape desc lexicographically, then name
-    def sort_key_stable(r: Dict[str, Any]):
-        return (RISK_ORDER.get(r.get("risk", "Medium"), 9), r.get("shape",""))  # shape asc first
-    # We'll sort shape descending separately by using reverse on secondary step:
-    # easiest: custom tuple with inverted string isn't great; do: sort twice (stable)
-    # Step 1: name asc, Step 2: shape desc, Step 3: risk asc
-    # Python sort is stable.
-    def sort_rows_for_html(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        rows2 = sorted(rows, key=lambda x: x.get("name",""))
-        rows2 = sorted(rows2, key=lambda x: x.get("shape",""), reverse=True)
-        rows2 = sorted(rows2, key=lambda x: RISK_ORDER.get(x.get("risk","Medium"), 9))
-        return rows2
-
+    # HTML ordering: risk asc first
     amd_rows = sort_rows_for_html([r for r in all_rows if r.get("category") == "AMD"])
     intel_rows = sort_rows_for_html([r for r in all_rows if r.get("category") == "Intel"])
 
-    # --------------- Generate CSV ----------------
+    # --------------- Generate CSV (Y/N availability) ----------------
     with open(csv_path, mode="w", newline="", encoding="utf-8") as csvfile:
         fieldnames = [
             "Category", "Risk", "oCPU", "MemoryGB", "Shape", "InstanceName", "Creator", "Lifecycle", "CurrentCostMo",
-            f"{E5_TARGET}_avail", f"{E6_TARGET}_avail", "E5_E6_Flex_monthly_addon",
+            f"{E5_TARGET}_avail", f"{E6_TARGET}_avail", "E5/E6.Flex monthly add-on",
             f"{STD3_TARGET}_avail", f"{OPT3_TARGET}_avail", "Intel_best_monthly_addon",
             "AvailabilityDomain", "CompartmentName", "CompartmentId", "OCID",
         ]
@@ -777,10 +813,10 @@ def main():
 
         for r in all_rows:
             comp_id = r.get("compartment_id", "")
-            e5_y = bool_to_yn(icon_to_bool(r.get("e5_icon","❌"))) if r.get("category") == "AMD" else ""
-            e6_y = bool_to_yn(icon_to_bool(r.get("e6_icon","❌"))) if r.get("category") == "AMD" else ""
-            s3_y = bool_to_yn(icon_to_bool(r.get("std3_icon","❌"))) if r.get("category") == "Intel" else ""
-            o3_y = bool_to_yn(icon_to_bool(r.get("opt3_icon","❌"))) if r.get("category") == "Intel" else ""
+            e5_y = bool_to_yn(r.get("e5_icon", "❌") == "✅") if r.get("category") == "AMD" else ""
+            e6_y = bool_to_yn(r.get("e6_icon", "❌") == "✅") if r.get("category") == "AMD" else ""
+            s3_y = bool_to_yn(r.get("std3_icon", "❌") == "✅") if r.get("category") == "Intel" else ""
+            o3_y = bool_to_yn(r.get("opt3_icon", "❌") == "✅") if r.get("category") == "Intel" else ""
 
             writer.writerow({
                 "Category": r.get("category", ""),
@@ -794,7 +830,7 @@ def main():
                 "CurrentCostMo": fmt_money(r.get("current_cost")),
                 f"{E5_TARGET}_avail": e5_y,
                 f"{E6_TARGET}_avail": e6_y,
-                "E5_E6_Flex_monthly_addon": fmt_delta(r.get("e56_delta")) if r.get("category") == "AMD" else "",
+                "E5/E6.Flex monthly add-on": fmt_delta(r.get("e56_delta")) if r.get("category") == "AMD" else "",
                 f"{STD3_TARGET}_avail": s3_y,
                 f"{OPT3_TARGET}_avail": o3_y,
                 "Intel_best_monthly_addon": fmt_delta(r.get("best_intel_delta")) if r.get("category") == "Intel" else "",
