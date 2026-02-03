@@ -9,36 +9,15 @@ Outputs (auto-named, UTC timestamp):
   - king-kaiYYYYMMDD-HHMM.html
   - king-kaiYYYYMMDD-HHMM.csv
 
-HTML (NO OCID/Compartment details):
-  - Executive intro summary (counts + pricing disclaimer)
-  - Two sections (tables):
-      AMD table columns (order):
-        Risk, oCPU, Memory [GB], Shape, Instance Name, Creator, Lifecycle, Current Cost/mo,
-        VM.Standard.E5.Flex avail (✅/❌), VM.Standard.E6.Flex avail (✅/❌),
-        VM.Standard.E5/E6.Flex delta add-on $/mo.   (combined, right-most column)
-
-      Intel table columns (order):
-        Risk, oCPU, Memory [GB], Shape, Instance Name, Creator, Lifecycle, Current Cost/mo,
-        VM.Standard3.Flex avail (✅/❌), VM.Optimized3.Flex avail (✅/❌),
-        (Intel keeps its own deltas per-target in CSV; HTML stays aligned to AMD request)
-
-  - Rows are sorted by Shape (descending) within each table
-
-CSV (includes OCID + compartment details for advanced use):
-  - Includes all columns + AvailabilityDomain, CompartmentName, CompartmentId, OCID.
-
-Adjustments implemented from your request:
-  1) Script name: king-kai.py (usage updated)
-  2) No required flags; runs as-is
-  3) AMD E5/E6 deltas combined into one column (right-most)
-  4) Executive intro block restored + pricing disclaimer: "Jan-2026 OCI pricing list baseline"
-  5) Risk "Critical" for VM.Standard.E2.1
-  6) New column "Creator" (best-effort from defined/freeform tags: createdBy/creator/CreatedBy/Owner)
-  7) HTML column order updated as requested (AMD); Intel table also includes Creator and the same core order
-
-Important:
-  - "Creator" relies on tags. If no creator-like tag exists, it will show "Unknown".
-  - Availability checks are best-effort: shape catalog + quota signals (if available) for the compartment/AD.
+Updates included (this week):
+  1) Rename column "VM.Standard.E5/E6.Flex delta add-on $/mo." -> "E5/E6.Flex monthly add-on"
+     (HTML + CSV)
+  2) CSV availability icons are Y/N (instead of ✅/❌).
+  3) HTML sorting: Risk ascending (Critical -> High -> Medium) within each table,
+     then Shape descending (to keep shape grouping readable).
+  4) HTML "Creator" formatting:
+     - If creator looks like "default/<user>" or "Default/<user>" => show only "<user>"
+     - If creator looks like an OCID (ocid1...) or service principal/process => keep full string
 """
 
 import oci
@@ -151,6 +130,14 @@ def fmt_delta(v: Optional[float]) -> str:
     return f"{sign}${abs(v):,.2f}"
 
 
+def bool_to_yn(v: Any) -> str:
+    return "Y" if v else "N"
+
+
+def icon_to_bool(icon: str) -> bool:
+    return icon == "✅"
+
+
 def collect_all_compartments(identity_client, tenancy_id: str) -> Tuple[List[str], Dict[str, str]]:
     comp_ids: List[str] = []
     comp_name_by_id: Dict[str, str] = {}
@@ -186,37 +173,63 @@ def list_availability_domains(identity_client, tenancy_id: str) -> List[str]:
         return []
 
 
+# ------------------------------------------------------------
+#  Creator extraction / formatting
+# ------------------------------------------------------------
 def get_creator_from_tags(freeform: Optional[Dict[str, Any]], defined: Optional[Dict[str, Any]]) -> str:
     """
     Best-effort "Creator" from tags.
-    Looks for common keys in freeform + defined tags.
     """
     candidates = {
-        "creator", "createdby", "created_by", "created-by", "createdBy",
-        "owner", "created", "createdByEmail", "created_by_email"
+        "creator", "createdby", "created_by", "created-by", "createdbyemail",
+        "owner", "created", "created_by_email", "createdbyemailaddress"
     }
 
     ff = freeform or {}
     df = defined or {}
 
-    # defined tags structure: {namespace: {key: value}}
     def iter_defined():
         for ns, d in df.items():
             if isinstance(d, dict):
                 for k, v in d.items():
                     yield k, v
 
-    # freeform first
     for k, v in ff.items():
         if str(k).strip().lower() in candidates and v:
             return str(v)
 
-    # defined tags next
     for k, v in iter_defined():
         if str(k).strip().lower() in candidates and v:
             return str(v)
 
     return "Unknown"
+
+
+def creator_for_html(creator: str) -> str:
+    """
+    Requirement:
+      - If it's "default/<user>" => show just "<user>"
+      - If it's an OCID (ocid1...) or service/process => keep full string
+    """
+    if not creator or creator == "Unknown":
+        return "Unknown"
+
+    c = creator.strip()
+
+    # keep full if OCID
+    if c.lower().startswith("ocid1."):
+        return c
+
+    # keep full if looks like service/process
+    if any(tok in c.lower() for tok in ["instanceprincipal", "resourceprincipal", "service", "automation", "pipeline", "oci", "oracle", "process"]):
+        return c
+
+    # remove default/ prefix (case-insensitive)
+    m = re.match(r"^(default/)(.+)$", c, flags=re.IGNORECASE)
+    if m:
+        return m.group(2)
+
+    return c
 
 
 # ------------------------------------------------------------
@@ -249,6 +262,9 @@ def risk_for_shape(shape: str) -> str:
     return "Medium"
 
 
+RISK_ORDER = {"Critical": 0, "High": 1, "Medium": 2}
+
+
 # ------------------------------------------------------------
 #  Cost engine (baseline from your calculator)
 # ------------------------------------------------------------
@@ -272,16 +288,6 @@ def current_monthly_cost(shape: str, ocpu: Optional[float], mem_gb: Optional[flo
         return linear_flex_cost(AMD_FLEX_PRICING["E3"], ocpu, mem_gb)
     if shape == "VM.Standard.E4.Flex":
         return linear_flex_cost(AMD_FLEX_PRICING["E4"], ocpu, mem_gb)
-
-    # best-effort if regex includes these
-    if shape == E5_TARGET:
-        return linear_flex_cost(AMD_FLEX_PRICING["E5"], ocpu, mem_gb)
-    if shape == E6_TARGET:
-        return linear_flex_cost(AMD_FLEX_PRICING["E6"], ocpu, mem_gb)
-    if shape == STD3_TARGET:
-        return linear_flex_cost(INTEL_FLEX_PRICING["STD3"], ocpu, mem_gb)
-    if shape == OPT3_TARGET:
-        return linear_flex_cost(INTEL_FLEX_PRICING["OPT3"], ocpu, mem_gb)
 
     return None
 
@@ -485,7 +491,7 @@ def evaluate_upgrade_option(
 
 
 # ------------------------------------------------------------
-#  Scan: shapes-only (enrich with Creator, costs, deltas)
+#  Scan
 # ------------------------------------------------------------
 def scan_compartment_shapes_only(
     comp_id: str,
@@ -568,7 +574,7 @@ def html_table_amd(rows: List[Dict[str, Any]]) -> str:
         "<th>Current Cost/mo</th>"
         f"<th>{esc(E5_TARGET)} avail</th>"
         f"<th>{esc(E6_TARGET)} avail</th>"
-        "<th>VM.Standard.E5/E6.Flex delta add-on $/mo.</th>"
+        "<th>E5/E6.Flex monthly add-on</th>"
         "</tr>"
     )
 
@@ -582,7 +588,7 @@ def html_table_amd(rows: List[Dict[str, Any]]) -> str:
             f"<td class='num'>{esc(fmt_num(r.get('mem_gb')))}</td>"
             f"<td class='mono'>{esc(r['shape'])}</td>"
             f"<td>{esc(r['name'])}</td>"
-            f"<td>{esc(r.get('creator','Unknown'))}</td>"
+            f"<td>{esc(creator_for_html(r.get('creator','Unknown')))}</td>"
             f"<td>{esc(r.get('lifecycle_state',''))}</td>"
             f"<td class='num'>{esc(fmt_money(r.get('current_cost')))}</td>"
             f"<td class='center'>{esc(r.get('e5_icon','❌'))}</td>"
@@ -611,7 +617,7 @@ def html_table_intel(rows: List[Dict[str, Any]]) -> str:
         "<th>Current Cost/mo</th>"
         f"<th>{esc(STD3_TARGET)} avail</th>"
         f"<th>{esc(OPT3_TARGET)} avail</th>"
-        "<th>Upgrade delta add-on $/mo. (best option)</th>"
+        "<th>Upgrade monthly add-on (best option)</th>"
         "</tr>"
     )
 
@@ -625,7 +631,7 @@ def html_table_intel(rows: List[Dict[str, Any]]) -> str:
             f"<td class='num'>{esc(fmt_num(r.get('mem_gb')))}</td>"
             f"<td class='mono'>{esc(r['shape'])}</td>"
             f"<td>{esc(r['name'])}</td>"
-            f"<td>{esc(r.get('creator','Unknown'))}</td>"
+            f"<td>{esc(creator_for_html(r.get('creator','Unknown')))}</td>"
             f"<td>{esc(r.get('lifecycle_state',''))}</td>"
             f"<td class='num'>{esc(fmt_money(r.get('current_cost')))}</td>"
             f"<td class='center'>{esc(r.get('std3_icon','❌'))}</td>"
@@ -647,7 +653,6 @@ def main():
     parser.add_argument("--output-dir", default=".", help="Directory to write reports (default: current directory)")
     args = parser.parse_args()
 
-    # Load OCI config
     try:
         config = oci.config.from_file(profile_name=args.profile)
     except Exception as e:
@@ -660,8 +665,8 @@ def main():
         sys.exit(1)
 
     identity_client = oci.identity.IdentityClient(config)
-    compute_client  = oci.core.ComputeClient(config)
-    limits_client   = oci.limits.LimitsClient(config)
+    compute_client = oci.core.ComputeClient(config)
+    limits_client = oci.limits.LimitsClient(config)
 
     stamp = now_stamp_utc()
     base_name = f"king-kai{stamp}"
@@ -722,9 +727,7 @@ def main():
             r["e5_icon"] = "✅" if e5_ok else "❌"
             r["e6_icon"] = "✅" if e6_ok else "❌"
 
-            # Combine delta since E5 == E6 pricing baseline
             e5_cost = target_monthly_cost(E5_TARGET, ocpu, mem_gb)
-            # (E6 cost same, so one delta)
             r["e56_delta"] = round(e5_cost - cur_cost, 2) if (e5_cost is not None and cur_cost is not None) else None
 
         if r.get("category") == "Intel":
@@ -735,24 +738,38 @@ def main():
 
             std3_cost = target_monthly_cost(STD3_TARGET, ocpu, mem_gb)
             opt3_cost = target_monthly_cost(OPT3_TARGET, ocpu, mem_gb)
-
             std3_delta = (round(std3_cost - cur_cost, 2) if (std3_cost is not None and cur_cost is not None) else None)
             opt3_delta = (round(opt3_cost - cur_cost, 2) if (opt3_cost is not None and cur_cost is not None) else None)
 
-            # "best" = lower delta add-on (most cost-efficient upgrade)
             candidates = [d for d in [std3_delta, opt3_delta] if d is not None]
             r["best_intel_delta"] = min(candidates) if candidates else None
 
-    # Split + sort for HTML (Shape descending)
-    amd_rows = sorted([r for r in all_rows if r.get("category") == "AMD"], key=lambda x: x.get("shape", ""), reverse=True)
-    intel_rows = sorted([r for r in all_rows if r.get("category") == "Intel"], key=lambda x: x.get("shape", ""), reverse=True)
+    # Sorting (HTML): Risk asc (Critical->High->Medium), then Shape desc, then Instance name
+    def sort_key(r: Dict[str, Any]):
+        return (RISK_ORDER.get(r.get("risk", "Medium"), 9), -(hash(r.get("shape","")) % (10**9)), r.get("shape",""), r.get("name",""))
 
-    # --------------- Generate CSV (keeps OCID + compartment details) ----------------
+    # Better stable sort: use risk order, then shape desc lexicographically, then name
+    def sort_key_stable(r: Dict[str, Any]):
+        return (RISK_ORDER.get(r.get("risk", "Medium"), 9), r.get("shape",""))  # shape asc first
+    # We'll sort shape descending separately by using reverse on secondary step:
+    # easiest: custom tuple with inverted string isn't great; do: sort twice (stable)
+    # Step 1: name asc, Step 2: shape desc, Step 3: risk asc
+    # Python sort is stable.
+    def sort_rows_for_html(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        rows2 = sorted(rows, key=lambda x: x.get("name",""))
+        rows2 = sorted(rows2, key=lambda x: x.get("shape",""), reverse=True)
+        rows2 = sorted(rows2, key=lambda x: RISK_ORDER.get(x.get("risk","Medium"), 9))
+        return rows2
+
+    amd_rows = sort_rows_for_html([r for r in all_rows if r.get("category") == "AMD"])
+    intel_rows = sort_rows_for_html([r for r in all_rows if r.get("category") == "Intel"])
+
+    # --------------- Generate CSV ----------------
     with open(csv_path, mode="w", newline="", encoding="utf-8") as csvfile:
         fieldnames = [
             "Category", "Risk", "oCPU", "MemoryGB", "Shape", "InstanceName", "Creator", "Lifecycle", "CurrentCostMo",
-            f"{E5_TARGET}_avail", f"{E6_TARGET}_avail", "E5_E6_delta_addon",
-            f"{STD3_TARGET}_avail", f"{OPT3_TARGET}_avail", "Intel_best_delta_addon",
+            f"{E5_TARGET}_avail", f"{E6_TARGET}_avail", "E5_E6_Flex_monthly_addon",
+            f"{STD3_TARGET}_avail", f"{OPT3_TARGET}_avail", "Intel_best_monthly_addon",
             "AvailabilityDomain", "CompartmentName", "CompartmentId", "OCID",
         ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -760,6 +777,11 @@ def main():
 
         for r in all_rows:
             comp_id = r.get("compartment_id", "")
+            e5_y = bool_to_yn(icon_to_bool(r.get("e5_icon","❌"))) if r.get("category") == "AMD" else ""
+            e6_y = bool_to_yn(icon_to_bool(r.get("e6_icon","❌"))) if r.get("category") == "AMD" else ""
+            s3_y = bool_to_yn(icon_to_bool(r.get("std3_icon","❌"))) if r.get("category") == "Intel" else ""
+            o3_y = bool_to_yn(icon_to_bool(r.get("opt3_icon","❌"))) if r.get("category") == "Intel" else ""
+
             writer.writerow({
                 "Category": r.get("category", ""),
                 "Risk": r.get("risk", ""),
@@ -770,12 +792,12 @@ def main():
                 "Creator": r.get("creator", "Unknown"),
                 "Lifecycle": r.get("lifecycle_state", ""),
                 "CurrentCostMo": fmt_money(r.get("current_cost")),
-                f"{E5_TARGET}_avail": r.get("e5_icon", ""),
-                f"{E6_TARGET}_avail": r.get("e6_icon", ""),
-                "E5_E6_delta_addon": fmt_delta(r.get("e56_delta")) if r.get("category") == "AMD" else "",
-                f"{STD3_TARGET}_avail": r.get("std3_icon", ""),
-                f"{OPT3_TARGET}_avail": r.get("opt3_icon", ""),
-                "Intel_best_delta_addon": fmt_delta(r.get("best_intel_delta")) if r.get("category") == "Intel" else "",
+                f"{E5_TARGET}_avail": e5_y,
+                f"{E6_TARGET}_avail": e6_y,
+                "E5_E6_Flex_monthly_addon": fmt_delta(r.get("e56_delta")) if r.get("category") == "AMD" else "",
+                f"{STD3_TARGET}_avail": s3_y,
+                f"{OPT3_TARGET}_avail": o3_y,
+                "Intel_best_monthly_addon": fmt_delta(r.get("best_intel_delta")) if r.get("category") == "Intel" else "",
                 "AvailabilityDomain": r.get("availability_domain", ""),
                 "CompartmentName": comp_name_by_id.get(comp_id, ""),
                 "CompartmentId": comp_id,
@@ -784,9 +806,8 @@ def main():
 
     print(f"🗒️ CSV report saved to: {csv_path}")
 
-    # --------------- Generate HTML (no OCID + no compartment details) ----------------
+    # --------------- Generate HTML ----------------
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -808,9 +829,9 @@ def main():
     th {{ background:#34495e; color:white; }}
     tr:nth-child(even) {{ background:#f2f2f2; }}
 
-    .critrow {{ background:#f8d7da !important; }}  /* deeper red */
-    .highrow {{ background:#fdecea !important; }}  /* light red */
-    .medrow  {{ background:#fff4e5 !important; }}  /* light orange */
+    .critrow {{ background:#f8d7da !important; }}
+    .highrow {{ background:#fdecea !important; }}
+    .medrow  {{ background:#fff4e5 !important; }}
 
     .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:12px; }}
     .note {{ font-size:12px; color:#555; margin-top:10px; }}
@@ -823,7 +844,8 @@ def main():
   <p><strong>Generated:</strong> {esc(generated)}</p>
   <p><strong>Old instances found:</strong> {len(all_rows)}</p>
   <p class="subtle">
-    Pricing baseline is based on <strong>Jan-2026 OCI pricing list</strong> (OCI Calculator-style monthly USD estimates). Actual tenancy billing may differ (discounts, credits, region).
+    Pricing baseline is based on <strong>Jan-2026 OCI pricing list</strong> (OCI Calculator-style monthly USD estimates).
+    Actual tenancy billing may differ (discounts, credits, region).
   </p>
 
   <div class="cardwrap">
