@@ -28,7 +28,10 @@ What it does?
 
 ______________________________________________________________________________________________________________________________________________________________________________________________
 
-### 3. 🐉 AD-to-AD Compute Migration Toolkit - BULMA  
+
+
+
+### 2. 🐉 AD-to-AD Compute Migration Toolkit - BULMA  
 <img width="186" height="105" alt="image" src="https://github.com/user-attachments/assets/fa459be1-d8b8-4a6e-9179-304211c552a2" />
 
 BULMA helps teams safely migrate OCI compute instances from one Availability Domain (AD) to another using a backup & restore approach — without deleting or modifying the original server (beyond a controlled shutdown). Inspired by Bulma from Dragon Ball Z—the brilliant Capsule Corp engineer who builds practical tools and makes complex operations feel manageable—the script guides the user through an interactive flow in OCI Cloud Shell, then executes the migration with step-by-step visibility and progress (0%–100%) so operators always know exactly what’s happening during a critical cutover.
@@ -43,7 +46,11 @@ What it does?
 - 📦 Storage re-attachment — reattaches restored block volumes to the new instance, preserving attachment type (paravirtualized / iSCSI) where possible.
 - ⚖️ Load Balancer awareness (optional) — detects if the source instance is registered as a backend in an OCI classic Load Balancer and restores backend membership by adding the new instance IP:port back into the original backend set(s).
 - 📊 Maximum operator visibility — prints real-time progress for each step with overall % + current step %, including “what is happening now” messages so it’s safe to run under pressure.
+
+
+
 ______________________________________________________________________________________________________________________________________________________________________________________________
+
 
 
 
