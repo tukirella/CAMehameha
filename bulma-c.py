@@ -185,22 +185,78 @@ def infer_region_from_instance_ocid(instance_ocid: str) -> str:
 # Auth / client setup
 # =============================================================================
 
+def _is_cloud_shell() -> bool:
+    """Detect OCI Cloud Shell by the env vars it always sets."""
+    import os
+    return bool(os.environ.get("OCI_CS_USER_OCID") or os.environ.get("CLOUDSHELL_ID"))
+
+
 def get_signer_and_config(region_hint: str, profile: str = "DEFAULT"):
     """
     Returns (config, signer) with region always set.
 
     Priority:
-    1. Resource Principals  (OCI Functions / dynamic group with Resource Principal policies)
-    2. Instance Principals  (running directly on an OCI Compute instance)
-    3. ~/.oci/config        (developer workstation / CI with API-key credentials)
+    1. OCI Cloud Shell delegation token  (detected via OCI_CS_USER_OCID env var)
+    2. Resource Principals  (OCI Functions / dynamic group with Resource Principal policies)
+    3. Instance Principals  (running directly on an OCI Compute instance)
+    4. ~/.oci/config        (developer workstation / CI with API-key credentials)
 
     IMPORTANT: Each method is validated with a cheap list_regions() call BEFORE
     returning, so the caller gets a clear, actionable error message instead of a
     cryptic 401 far into the migration.
     """
+    import os
     auth_errors: Dict[str, str] = {}
 
-    # --- 1. Try Resource Principals ---
+    # --- 1. OCI Cloud Shell (delegation token) ---
+    if _is_cloud_shell():
+        try:
+            # Cloud Shell writes the delegation token to a well-known path and
+            # exposes OCI_DELEGATION_TOKEN_FILE (or the default path below).
+            token_path = os.environ.get(
+                "OCI_DELEGATION_TOKEN_FILE",
+                os.path.expanduser("~/.oci/token")  # Cloud Shell default
+            )
+            delegation_token = None
+            if os.path.exists(token_path):
+                with open(token_path, "r") as fh:
+                    delegation_token = fh.read().strip()
+
+            # Load the Cloud Shell config (~/.oci/config is pre-populated in Cloud Shell)
+            config = oci.config.from_file(profile_name=profile)
+            if not config.get("region"):
+                config["region"] = region_hint
+
+            if delegation_token:
+                signer = oci.auth.signers.InstancePrincipalsDelegationTokenSigner(
+                    delegation_token=delegation_token
+                )
+            else:
+                # Fallback: Cloud Shell may expose credentials via config only
+                signer = None
+
+            _validate_auth(config, signer, "Cloud Shell delegation token")
+            print("{} | [Auth] Using Cloud Shell delegation token (region={})".format(
+                _ts(), config.get("region")), flush=True)
+            return config, signer
+        except Exception as e:
+            auth_errors["Cloud Shell delegation token"] = str(e)
+            # Don't fall through to Instance Principals in Cloud Shell —
+            # that's what caused the 404. Jump straight to config file.
+            try:
+                config = oci.config.from_file(profile_name=profile)
+                if not config.get("region"):
+                    config["region"] = region_hint
+                signer = None
+                _validate_auth(config, signer, "Cloud Shell ~/.oci/config fallback")
+                print("{} | [Auth] Cloud Shell: using ~/.oci/config (profile={}, region={})".format(
+                    _ts(), profile, config.get("region")), flush=True)
+                return config, signer
+            except Exception as e2:
+                auth_errors["Cloud Shell ~/.oci/config fallback"] = str(e2)
+                _raise_all_auth_failed(auth_errors, region_hint, profile)
+
+    # --- 2. Try Resource Principals ---
     try:
         signer = oci.auth.signers.get_resource_principals_signer()
         region = getattr(signer, "region", None) or region_hint
@@ -214,7 +270,7 @@ def get_signer_and_config(region_hint: str, profile: str = "DEFAULT"):
     except Exception as e:
         auth_errors["Resource Principals"] = str(e)
 
-    # --- 2. Try Instance Principals ---
+    # --- 3. Try Instance Principals ---
     try:
         signer = oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
         region = getattr(signer, "region", None) or region_hint
