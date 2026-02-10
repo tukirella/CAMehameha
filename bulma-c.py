@@ -783,8 +783,29 @@ def create_new_instance(compute, instance, compartment_id: str, dest_ad: str, bo
     new_name = "{}-Bulma-{}".format(instance.display_name, suffix)
     shape = new_shape if new_shape else instance.shape
 
+    # Carry over ShapeConfig for flexible shapes (e.g. VM.Standard.E4.Flex).
+    # Flex shapes require explicit ocpus + memory_in_gbs — omitting this causes a 400.
+    shape_config = None
+    orig_sc = getattr(instance, "shape_config", None)
+    if orig_sc is not None:
+        ocpus = getattr(orig_sc, "ocpus", None)
+        memory_in_gbs = getattr(orig_sc, "memory_in_gbs", None)
+        if ocpus is not None and memory_in_gbs is not None:
+            shape_config = oci.core.models.LaunchInstanceShapeConfigDetails(
+                ocpus=float(ocpus),
+                memory_in_gbs=float(memory_in_gbs)
+            )
+            # Preserve baseline OCPU utilisation if set (e.g. BASELINE_1_8, BASELINE_1_2)
+            baseline = getattr(orig_sc, "baseline_ocpu_utilization", None)
+            if baseline:
+                shape_config.baseline_ocpu_utilization = baseline
+
     if progress:
-        progress.update(0.05, detail="Launching NEW instance: {} (shape={})".format(new_name, shape))
+        sc_info = " ocpus={} mem={}GB".format(
+            getattr(shape_config, "ocpus", "?"),
+            getattr(shape_config, "memory_in_gbs", "?")
+        ) if shape_config else ""
+        progress.update(0.05, detail="Launching NEW instance: {} (shape={}{})".format(new_name, shape, sc_info))
 
     source_details = oci.core.models.InstanceSourceViaBootVolumeDetails(boot_volume_id=boot_volume_id)
 
@@ -804,6 +825,7 @@ def create_new_instance(compute, instance, compartment_id: str, dest_ad: str, bo
         compartment_id=compartment_id,
         display_name=new_name,
         shape=shape,
+        shape_config=shape_config,
         source_details=source_details,
         create_vnic_details=create_vnic_details,
         metadata=metadata
