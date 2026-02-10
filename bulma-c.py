@@ -457,10 +457,11 @@ def get_instance_vnics(compute, network, compartment_id: str, instance_id: str):
     return vnics
 
 
-def get_instance_boot_volume_id(compute, compartment_id: str, instance_id: str) -> str:
+def get_instance_boot_volume_id(compute, compartment_id: str, instance_id: str, availability_domain: str) -> str:
     bvas = list_call_get_all_results(
         compute.list_boot_volume_attachments,
         compartment_id=compartment_id,
+        availability_domain=availability_domain,
         instance_id=instance_id
     ).data
     if not bvas:
@@ -958,7 +959,7 @@ def main():
         instance_vnics = get_instance_vnics(compute, network, compartment_id, instance_id)
         _, primary_vnic = instance_vnics[0]
 
-        boot_volume_id = get_instance_boot_volume_id(compute, compartment_id, instance_id)
+        boot_volume_id = get_instance_boot_volume_id(compute, compartment_id, instance_id, source_ad)
         block_attachments = get_instance_block_volume_attachments(compute, compartment_id, instance_id)
 
         prog.update(0.7, detail="region={} | sourceAD={} -> destAD={} | vnics={} | blockVols={}".format(
