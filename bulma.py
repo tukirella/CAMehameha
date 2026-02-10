@@ -2,32 +2,29 @@
 """
 bulma.py — OCI AD-to-AD Compute migration via Backup & Restore (keeps original instance)
 
-Run with ONLY the instance OCID(s) and Bulma will take care of the rest:
+Zero-prompt execution:
+  python3 bulma.py -- <INSTANCE_OCID>
+  python3 bulma.py -- <INSTANCE_OCID_1> <INSTANCE_OCID_2>
 
-  python3 bulma.py ocid1.instance.oc1.eu-frankfurt-1....
-  python3 bulma.py -- ocid1.instance.oc1.eu-frankfurt-1....        # if you want to "start with -" in your habit
-  python3 bulma.py -i ocid1.instance.oc1.eu-frankfurt-1....
+Why "--"?
+- If you accidentally type something that starts with "-", "--" tells argparse "end of options".
 
-Supports multiple instances:
-  python3 bulma.py ocid1.instance... ocid1.instance...
+What Bulma auto-discovers:
+- Region (from instance OCID: ocid1.instance.oc1.<region>....)
+- Compartment ID (from instance details)
+- Source AD (from instance details)
+- Boot volume + attached block volumes
+- Subnet + NSGs (from primary/secondary VNICs)
+- Optional classic LB membership (LBaaS) if --restore-lb
 
-Safe model:
-- STOP source instance (for consistent backups)
-- Backup boot + attached block volumes
-- Restore into destination AD (same region)
-- Launch NEW instance from restored boot volume
-- Recreate networking (same subnet + NSGs; NEW private IPs)
-- Reattach restored block volumes
-- OPTIONAL: classic Load Balancer (LBaaS) restore: add new backend(s) to same backend set(s)
-  Optional: set old backend(s) to DRAIN+OFFLINE
-
-Maximum visibility:
-- prints overall % + step % + live details throughout
+Safety:
+- Stops the original instance (for consistent backups)
+- Does NOT delete or modify the original instance beyond STOP
+- Creates a NEW instance in a different AD
+- Networking recreated with NEW private IP(s) (cannot preserve IP while original exists)
 
 Notes:
-- Primary private IP cannot be preserved while the original instance still exists.
-- This script handles classic Load Balancer (oci-load-balancer). Network Load Balancer (NLB) not included.
-
+- Handles classic Load Balancer (oci-load-balancer) backends (IP:port). Does NOT handle Network Load Balancer (NLB).
 """
 
 import argparse
@@ -148,54 +145,51 @@ class MultiProgress:
 # =============================================================================
 
 def parse_args():
-    p = argparse.ArgumentParser(
-        description="Bulma: AD-to-AD migration via backup/restore (keeps original instance)."
-    )
-    p.add_argument(
-        "instance_ids",
-        nargs="*",
-        help="Instance OCID(s) as positional args. Example: python3 bulma.py ocid1.instance..."
-    )
-    p.add_argument(
-        "-i", "--instance-id",
-        action="append",
-        dest="instance_id_flags",
-        default=[],
-        help="Instance OCID (repeatable). Example: -i ocid1.instance... -i ocid1.instance..."
-    )
-    p.add_argument(
-        "--dest-ad",
-        default="",
-        help="Destination Availability Domain name (optional). If omitted, Bulma picks a different AD automatically."
-    )
-    p.add_argument(
-        "--shape",
-        default="",
-        help="Optional new shape for the NEW instance (e.g., VM.Standard3.Flex). If omitted, keeps same shape."
-    )
-    p.add_argument(
-        "--ssh-key",
-        default="",
-        help="Optional SSH public key to inject into metadata (Linux)."
-    )
+    p = argparse.ArgumentParser(description="Bulma: AD-to-AD migration via backup/restore (keeps original instance).")
+    p.add_argument("instance_ids", nargs="+", help="Instance OCID(s). Example: python3 bulma.py -- ocid1.instance...")
+    p.add_argument("--dest-ad", default="", help="Optional destination AD name. If omitted, Bulma picks a different AD automatically.")
+    p.add_argument("--shape", default="", help="Optional shape for NEW instance. If omitted, keeps original shape.")
+    p.add_argument("--ssh-key", default="", help="Optional SSH public key to inject into metadata for NEW instance (Linux).")
 
-    # LB options
     p.add_argument("--restore-lb", action="store_true", help="Detect classic LB membership and re-add new backend(s).")
     p.add_argument("--lb-disable-old", action="store_true", help="After adding new backend(s), set old backend(s) drain+offline.")
     p.add_argument("--lb-compartment-id", default="", help="Compartment OCID where LB(s) live (default: same as instance compartment).")
 
-    # polling
     p.add_argument("--wait", type=int, default=3600, help="Max wait per resource state change (seconds). Default 3600.")
     p.add_argument("--poll", type=int, default=10, help="Polling interval seconds. Default 10.")
-
     return p.parse_args()
+
+
+# =============================================================================
+# Region inference (from OCID)
+# =============================================================================
+
+def infer_region_from_instance_ocid(instance_ocid: str) -> str:
+    """
+    ocid example:
+      ocid1.instance.oc1.eu-frankfurt-1.<unique...>
+    region id is the 4th token (index 3) when splitting by '.'
+    """
+    parts = instance_ocid.split(".")
+    if len(parts) < 5:
+        raise ValueError("Instance OCID format unexpected: {}".format(instance_ocid))
+    # parts[2] is 'oc1' (realm key). parts[3] is region id.
+    region = parts[3].strip()
+    if not region:
+        raise ValueError("Could not infer region from OCID: {}".format(instance_ocid))
+    return region
 
 
 # =============================================================================
 # Auth / client setup
 # =============================================================================
 
-def get_signer_and_config():
+def get_signer_and_config(region_hint: str):
+    """
+    Goal: ALWAYS return a config with region set.
+    - Try Resource Principals (if available) -> signer provides region
+    - Else use ~/.oci/config, but if region missing set from region_hint (from OCID)
+    """
     try:
         signer = oci.auth.signers.get_resource_principals_signer()
         config = {"region": signer.region, "tenancy": getattr(signer, "tenancy_id", None)}
@@ -204,7 +198,19 @@ def get_signer_and_config():
     except Exception:
         config = oci.config.from_file()
         signer = None
+
+        # If region is missing in ~/.oci/config, infer from OCID
+        if not config.get("region"):
+            config["region"] = region_hint
+
         print("{} | [Auth] Using config file (~/.oci/config) (region={})".format(_ts(), config.get("region")), flush=True)
+
+        if not config.get("region"):
+            raise RuntimeError("No region in ~/.oci/config and could not infer region. Provide a valid instance OCID.")
+
+        if not config.get("tenancy"):
+            raise RuntimeError("No tenancy in ~/.oci/config. Add tenancy OCID to config or use Resource Principal auth.")
+
         return config, signer
 
 
@@ -213,10 +219,7 @@ def get_tenancy_id(config: Dict[str, Any], signer) -> str:
         return config["tenancy"]
     if signer is not None and getattr(signer, "tenancy_id", None):
         return signer.tenancy_id
-    tid = input("Enter TENANCY OCID (required to list Availability Domains): ").strip()
-    if not tid.startswith("ocid1.tenancy"):
-        raise ValueError("Tenancy OCID does not look right.")
-    return tid
+    raise RuntimeError("Tenancy OCID missing (cannot list Availability Domains).")
 
 
 def get_clients(config: Dict[str, Any], signer=None):
@@ -233,14 +236,8 @@ def get_clients(config: Dict[str, Any], signer=None):
 # Wait helper
 # =============================================================================
 
-def wait_for_state(
-    getter_fn,
-    desired_state: str,
-    max_wait_seconds: int,
-    interval: int,
-    label: str,
-    progress: Optional["StepProgress"] = None
-):
+def wait_for_state(getter_fn, desired_state: str, max_wait_seconds: int, interval: int, label: str,
+                   progress: Optional["StepProgress"] = None):
     start = time.time()
     last_state = None
     while True:
@@ -252,8 +249,6 @@ def wait_for_state(
             if progress:
                 progress.update(min(0.95, (time.time() - start) / float(max_wait_seconds)),
                                 detail="{} state={} (waiting for {})".format(label, state, desired_state))
-            else:
-                print("{} | - waiting for {}: {} -> {}".format(_ts(), label, state, desired_state), flush=True)
 
         if state == desired_state:
             if progress:
@@ -331,18 +326,14 @@ def get_subnet_to_primary_ip_for_instance(network, instance_vnics) -> Dict[str, 
 
 def pick_destination_ad(identity, tenancy_id: str, source_ad: str, requested_dest_ad: str) -> str:
     ads = identity.list_availability_domains(tenancy_id).data
-    if not ads:
-        raise RuntimeError("No Availability Domains found in region.")
     ad_names = [a.name for a in ads]
-
     if requested_dest_ad:
         if requested_dest_ad not in ad_names:
-            raise ValueError("Requested --dest-ad '{}' not in this region AD list: {}".format(requested_dest_ad, ad_names))
+            raise ValueError("Requested --dest-ad '{}' not in region AD list: {}".format(requested_dest_ad, ad_names))
         if requested_dest_ad == source_ad:
-            raise ValueError("Requested --dest-ad equals source AD; choose a different AD.")
+            raise ValueError("Requested --dest-ad equals source AD. Choose a different AD.")
         return requested_dest_ad
 
-    # Auto-pick: choose first AD in list that differs from source_ad (stable + deterministic)
     for name in ad_names:
         if name != source_ad:
             return name
@@ -354,12 +345,8 @@ def pick_destination_ad(identity, tenancy_id: str, source_ad: str, requested_des
 # Classic Load Balancer discovery & restore
 # =============================================================================
 
-def discover_classic_lb_membership(
-    lb_client,
-    lb_compartment_id: str,
-    instance_ip_to_subnet: Dict[str, str],
-    progress: Optional["StepProgress"] = None
-) -> List[Dict[str, Any]]:
+def discover_classic_lb_membership(lb_client, lb_compartment_id: str, instance_ip_to_subnet: Dict[str, str],
+                                  progress: Optional["StepProgress"] = None) -> List[Dict[str, Any]]:
     instance_ips = set(instance_ip_to_subnet.keys())
     matches: List[Dict[str, Any]] = []
 
@@ -406,19 +393,11 @@ def discover_classic_lb_membership(
 
     if progress:
         progress.update(0.99, detail="LB scan done. Matches found: {}".format(len(matches)))
-
     return matches
 
 
-def ensure_backend_in_classic_lb(
-    lb_ops,
-    match: Dict[str, Any],
-    new_ip: str,
-    disable_old: bool,
-    progress: Optional["StepProgress"] = None,
-    idx: int = 0,
-    total: int = 1
-) -> None:
+def ensure_backend_in_classic_lb(lb_ops, match: Dict[str, Any], new_ip: str, disable_old: bool,
+                                progress: Optional["StepProgress"] = None, idx: int = 0, total: int = 1) -> None:
     lb_id = match["lb_id"]
     bs = match["backend_set_name"]
     port = match["port"]
@@ -448,7 +427,6 @@ def ensure_backend_in_classic_lb(
             wait_for_states=["SUCCEEDED"]
         )
     except oci.exceptions.ServiceError as e:
-        # Already exists -> update
         if e.status in (400, 409):
             backend_name = "{}:{}".format(new_ip, port)
             upd = oci.load_balancer.models.UpdateBackendDetails(
@@ -506,7 +484,6 @@ def stop_instance_if_needed(compute, instance, max_wait: int, poll: int, progres
         if progress:
             progress.update(1.0, detail="Instance already STOPPED")
         return
-
     if progress:
         progress.update(0.05, detail="Sending STOP action")
     compute.instance_action(instance.id, "STOP")
@@ -515,11 +492,11 @@ def stop_instance_if_needed(compute, instance, max_wait: int, poll: int, progres
         progress.update(1.0, detail="Instance STOPPED")
 
 
-def backup_boot_volume(block, boot_volume_id: str, name_prefix: str, max_wait: int, poll: int, progress: Optional["StepProgress"] = None) -> str:
+def backup_boot_volume(block, boot_volume_id: str, name_prefix: str, max_wait: int, poll: int,
+                       progress: Optional["StepProgress"] = None) -> str:
     display_name = "{}-boot-bkp-{}".format(name_prefix, datetime.utcnow().strftime("%Y%m%d%H%M%S"))
     if progress:
         progress.update(0.05, detail="Creating boot backup: {}".format(display_name))
-
     details = oci.core.models.CreateBootVolumeBackupDetails(
         boot_volume_id=boot_volume_id,
         display_name=display_name,
@@ -532,7 +509,8 @@ def backup_boot_volume(block, boot_volume_id: str, name_prefix: str, max_wait: i
     return bkp.id
 
 
-def backup_block_volumes(block, volume_attachments, name_prefix: str, max_wait: int, poll: int, progress: Optional["StepProgress"] = None) -> Dict[str, str]:
+def backup_block_volumes(block, volume_attachments, name_prefix: str, max_wait: int, poll: int,
+                         progress: Optional["StepProgress"] = None) -> Dict[str, str]:
     backup_map: Dict[str, str] = {}
     total = len(volume_attachments)
     if total == 0:
@@ -545,7 +523,6 @@ def backup_block_volumes(block, volume_attachments, name_prefix: str, max_wait: 
         display_name = "{}-blk-bkp-{}-{}".format(name_prefix, vol_id[-6:], datetime.utcnow().strftime("%Y%m%d%H%M%S"))
         if progress:
             progress.update((i - 1) / float(total), detail="Creating block backup {}/{}: {}".format(i, total, display_name))
-
         details = oci.core.models.CreateVolumeBackupDetails(
             volume_id=vol_id,
             display_name=display_name,
@@ -555,7 +532,6 @@ def backup_block_volumes(block, volume_attachments, name_prefix: str, max_wait: 
         wait_for_state(lambda: block.get_volume_backup(bkp.id).data, "AVAILABLE", max_wait, poll,
                        "block backup {}/{}".format(i, total), progress)
         backup_map[vol_id] = bkp.id
-
         if progress:
             progress.update(i / float(total), detail="Block backup {}/{} AVAILABLE".format(i, total))
 
@@ -608,26 +584,14 @@ def restore_block_volumes(block, compartment_id: str, dest_ad: str, volume_backu
         wait_for_state(lambda: block.get_volume(vol.id).data, "AVAILABLE", max_wait, poll,
                        "restored block volume {}/{}".format(i, total), progress)
         restored[orig_vol_id] = vol.id
-
         if progress:
             progress.update(i / float(total), detail="Restored block volume {}/{} AVAILABLE".format(i, total))
 
     return restored
 
 
-def create_new_instance(
-    compute,
-    instance,
-    compartment_id: str,
-    dest_ad: str,
-    boot_volume_id: str,
-    primary_vnic,
-    new_shape: str,
-    ssh_key: str,
-    max_wait: int,
-    poll: int,
-    progress: Optional["StepProgress"] = None
-) -> Tuple[str, str]:
+def create_new_instance(compute, instance, compartment_id: str, dest_ad: str, boot_volume_id: str, primary_vnic,
+                        new_shape: str, ssh_key: str, max_wait: int, poll: int, progress: Optional["StepProgress"] = None) -> Tuple[str, str]:
     suffix = datetime.utcnow().strftime("%Y%m%d%H%M%S")
     new_name = "{}-Bulma-{}".format(instance.display_name, suffix)
     shape = new_shape if new_shape else instance.shape
@@ -641,11 +605,10 @@ def create_new_instance(
     if ssh_key:
         metadata["ssh_authorized_keys"] = ssh_key
 
-    assign_public_ip = bool(getattr(primary_vnic, "public_ip", None))
     create_vnic_details = oci.core.models.CreateVnicDetails(
         subnet_id=primary_vnic.subnet_id,
         display_name=primary_vnic.display_name or "{}-vnic0".format(new_name),
-        assign_public_ip=assign_public_ip,
+        assign_public_ip=bool(getattr(primary_vnic, "public_ip", None)),
         nsg_ids=list(primary_vnic.nsg_ids or [])
     )
 
@@ -663,7 +626,6 @@ def create_new_instance(
     wait_for_state(lambda: compute.get_instance(new_inst.id).data, "RUNNING", max_wait, poll, "new instance", progress)
     if progress:
         progress.update(1.0, detail="New instance RUNNING")
-
     return new_inst.id, new_name
 
 
@@ -686,15 +648,11 @@ def attach_secondary_vnics(compute, instance_vnics, new_instance_id: str, max_wa
             assign_public_ip=bool(getattr(vnic, "public_ip", None)),
             nsg_ids=list(vnic.nsg_ids or [])
         )
-        details = oci.core.models.CreateVnicAttachmentDetails(
-            instance_id=new_instance_id,
-            create_vnic_details=create_vnic
-        )
+        details = oci.core.models.CreateVnicAttachmentDetails(instance_id=new_instance_id, create_vnic_details=create_vnic)
         va = compute.attach_vnic(details).data
         wait_for_state(lambda: compute.get_vnic_attachment(va.id).data, "ATTACHED", max_wait, poll,
                        "vnic_attachment {}/{}".format(idx, total), progress)
         created.append(va.id)
-
         if progress:
             progress.update(idx / float(total), detail="Secondary VNIC {}/{} ATTACHED".format(idx, total))
 
@@ -721,17 +679,11 @@ def attach_restored_volumes(compute, new_instance_id: str, original_attachments,
 
         if atype == "ISCSI":
             details = oci.core.models.AttachIScsiVolumeDetails(
-                instance_id=new_instance_id,
-                volume_id=new_vol_id,
-                is_read_only=is_read_only,
-                display_name=getattr(att, "display_name", None)
+                instance_id=new_instance_id, volume_id=new_vol_id, is_read_only=is_read_only, display_name=getattr(att, "display_name", None)
             )
         else:
             details = oci.core.models.AttachParavirtualizedVolumeDetails(
-                instance_id=new_instance_id,
-                volume_id=new_vol_id,
-                is_read_only=is_read_only,
-                display_name=getattr(att, "display_name", None)
+                instance_id=new_instance_id, volume_id=new_vol_id, is_read_only=is_read_only, display_name=getattr(att, "display_name", None)
             )
             device = getattr(att, "device", None)
             if device:
@@ -740,7 +692,6 @@ def attach_restored_volumes(compute, new_instance_id: str, original_attachments,
         va = compute.attach_volume(details).data
         wait_for_state(lambda: compute.get_volume_attachment(va.id).data, "ATTACHED", max_wait, poll,
                        "volume_attachment {}/{}".format(i, total), progress)
-
         attached.append(va.id)
         if progress:
             progress.update(i / float(total), detail="Volume {}/{} ATTACHED".format(i, total))
@@ -755,32 +706,23 @@ def attach_restored_volumes(compute, new_instance_id: str, original_attachments,
 def main():
     args = parse_args()
 
-    instance_ids = []
-    instance_ids.extend(args.instance_ids or [])
-    instance_ids.extend(args.instance_id_flags or [])
-    instance_ids = [x.strip() for x in instance_ids if x and x.strip()]
-
-    if not instance_ids:
-        print("ERROR: You must provide at least one instance OCID.\n"
-              "Example: python3 bulma.py ocid1.instance...\n"
-              "Or:      python3 bulma.py -i ocid1.instance...\n"
-              "Or:      python3 bulma.py -- ocid1.instance...\n")
-        sys.exit(2)
-
-    for ocid in instance_ids:
+    # validate + infer region
+    for ocid in args.instance_ids:
         if not ocid.startswith("ocid1.instance"):
-            print("ERROR: '{}' does not look like an instance OCID.".format(ocid))
-            sys.exit(2)
+            raise ValueError("Not an instance OCID: {}".format(ocid))
 
-    config, signer = get_signer_and_config()
+    regions = sorted(set(infer_region_from_instance_ocid(x) for x in args.instance_ids))
+    if len(regions) != 1:
+        raise ValueError("All instance OCIDs must be in the same region. Found regions: {}".format(regions))
+    region_hint = regions[0]
+
+    config, signer = get_signer_and_config(region_hint)
     identity, compute, network, block, lb, lb_ops = get_clients(config, signer)
     tenancy_id = get_tenancy_id(config, signer)
 
-    multi = MultiProgress(len(instance_ids))
-    report: List[Dict[str, Any]] = []
+    multi = MultiProgress(len(args.instance_ids))
 
-    for n, instance_id in enumerate(instance_ids, start=1):
-        label = "Bulma | {}".format(instance_id[-10:])
+    for n, instance_id in enumerate(args.instance_ids, start=1):
         steps = [
             ("Discover configuration", 10),
             ("Scan Load Balancers", 8 if args.restore_lb else 0),
@@ -794,39 +736,35 @@ def main():
             ("Attach block volumes", 10),
             ("Restore LB backends", 10 if args.restore_lb else 0),
         ]
-        prog = StepProgress(label=label, steps=steps, overall_prefix=multi.overall_prefix(n))
 
-        print("\n" + "=" * 90)
-        print("{} | {} START instance migration: {}".format(_ts(), multi.overall_prefix(n), instance_id), flush=True)
-        print("=" * 90)
+        prog = StepProgress(label="Bulma | {}".format(instance_id[-10:]), steps=steps, overall_prefix=multi.overall_prefix(n))
 
-        # Discover (no prompts)
         prog.start_step("Discover configuration")
         inst = compute.get_instance(instance_id).data
+        prog.label = "Bulma | {}".format(inst.display_name)
+
         compartment_id = inst.compartment_id
         source_ad = inst.availability_domain
+        dest_ad = pick_destination_ad(identity, tenancy_id, source_ad, args.dest_ad)
 
         instance_vnics = get_instance_vnics(compute, network, compartment_id, instance_id)
-        if not instance_vnics:
-            raise RuntimeError("No VNIC attachments found for instance {}".format(instance_id))
         _, primary_vnic = instance_vnics[0]
 
         boot_volume_id = get_instance_boot_volume_id(compute, compartment_id, instance_id)
         block_attachments = get_instance_block_volume_attachments(compute, compartment_id, instance_id)
 
-        dest_ad = pick_destination_ad(identity, tenancy_id, source_ad, args.dest_ad)
-        prog.update(0.7, detail="name='{}' | sourceAD={} -> destAD={} | vnics={} | blockVols={}".format(
-            inst.display_name, source_ad, dest_ad, len(instance_vnics), len(block_attachments)
+        prog.update(0.7, detail="region={} | sourceAD={} -> destAD={} | vnics={} | blockVols={}".format(
+            config.get("region"), source_ad, dest_ad, len(instance_vnics), len(block_attachments)
         ))
         prog.complete_step("Configuration collected")
 
-        # LB scan (optional)
+        # LB scan
         lb_matches: List[Dict[str, Any]] = []
         lb_compartment_id = args.lb_compartment_id.strip() or compartment_id
         if args.restore_lb:
             prog.start_step("Scan Load Balancers")
             ip_to_subnet = get_ip_to_subnet_map_for_instance(network, instance_vnics)
-            prog.update(0.05, detail="Instance IPs discovered: {} | scanning LBs in compartment {}".format(len(ip_to_subnet), lb_compartment_id))
+            prog.update(0.05, detail="scanning classic LBs in compartment {}".format(lb_compartment_id))
             lb_matches = discover_classic_lb_membership(lb, lb_compartment_id, ip_to_subnet, progress=prog)
             prog.complete_step("LB matches={}".format(len(lb_matches)))
 
@@ -867,85 +805,40 @@ def main():
 
         # Secondary VNICs
         prog.start_step("Attach secondary VNICs")
-        created_vnic_attachment_ids = attach_secondary_vnics(compute, instance_vnics, new_instance_id, args.wait, args.poll, progress=prog)
-        prog.complete_step("Secondary VNICs attached (count={})".format(len(created_vnic_attachment_ids)))
+        attach_secondary_vnics(compute, instance_vnics, new_instance_id, args.wait, args.poll, progress=prog)
+        prog.complete_step("Secondary VNICs attached")
 
         # Attach volumes
         prog.start_step("Attach block volumes")
-        created_volume_attachment_ids = attach_restored_volumes(
-            compute, new_instance_id, block_attachments, restored_blk_map, args.wait, args.poll, progress=prog
-        )
-        prog.complete_step("Volumes attached (count={})".format(len(created_volume_attachment_ids)))
+        attach_restored_volumes(compute, new_instance_id, block_attachments, restored_blk_map, args.wait, args.poll, progress=prog)
+        prog.complete_step("Volumes attached")
 
-        # Determine new IPs for LB restore
-        new_instance_vnics = get_instance_vnics(compute, network, compartment_id, new_instance_id)
-        new_subnet_to_ip = get_subnet_to_primary_ip_for_instance(network, new_instance_vnics)
-        new_primary_private_ip = new_subnet_to_ip.get(primary_vnic.subnet_id)
-
-        lb_actions: List[Dict[str, Any]] = []
+        # LB restore
         if args.restore_lb:
             prog.start_step("Restore LB backends")
             if lb_matches:
-                total_matches = len(lb_matches)
+                new_instance_vnics = get_instance_vnics(compute, network, compartment_id, new_instance_id)
+                new_subnet_to_ip = get_subnet_to_primary_ip_for_instance(network, new_instance_vnics)
+                new_primary_private_ip = new_subnet_to_ip.get(primary_vnic.subnet_id)
+
+                total = len(lb_matches)
                 for i, m in enumerate(lb_matches):
                     desired_ip = new_subnet_to_ip.get(m.get("subnet_id")) or new_primary_private_ip
                     if not desired_ip:
-                        prog.update((i + 1) / float(total_matches), detail="Could not determine new IP; skipping backend restore")
+                        prog.update((i + 1) / float(total), detail="Could not determine new IP; skipping backend restore")
                         continue
-                    ensure_backend_in_classic_lb(lb_ops, m, desired_ip, args.lb_disable_old, progress=prog, idx=i, total=total_matches)
-                    lb_actions.append({
-                        "lb_name": m["lb_name"],
-                        "backend_set": m["backend_set_name"],
-                        "old_backend": "{}:{}".format(m["old_ip"], m["port"]),
-                        "new_backend": "{}:{}".format(desired_ip, m["port"]),
-                        "disabled_old": args.lb_disable_old
-                    })
-                prog.complete_step("LB restored (actions={})".format(len(lb_actions)))
+                    ensure_backend_in_classic_lb(lb_ops, m, desired_ip, args.lb_disable_old, progress=prog, idx=i, total=total)
+
+                prog.complete_step("LB restored")
             else:
                 prog.update(1.0, detail="No LB membership detected; nothing to restore")
                 prog.complete_step("Skipped")
-
-        print("\n{} | {} DONE ✅ New instance: {} ({})".format(_ts(), multi.overall_prefix(n), new_instance_name, new_instance_id), flush=True)
-        print("{} | {} NOTE: Original instance remains STOPPED and otherwise unchanged.\n".format(_ts(), multi.overall_prefix(n)), flush=True)
-
-        report.append({
-            "source_instance": inst.display_name,
-            "source_instance_id": inst.id,
-            "source_ad": source_ad,
-            "dest_ad": dest_ad,
-            "new_instance": new_instance_name,
-            "new_instance_id": new_instance_id,
-            "new_primary_private_ip": new_primary_private_ip,
-            "boot_backup_id": boot_bkp_id,
-            "restored_boot_volume_id": new_boot_vol_id,
-            "restored_block_volumes_count": len(restored_blk_map),
-            "lb_actions": lb_actions
-        })
-
-    # Final summary
-    print("\n" + "#" * 90)
-    print("{} | BULMA MIGRATION REPORT".format(_ts()))
-    print("#" * 90)
-    for r in report:
-        print("\nSource: {} ({})".format(r["source_instance"], r["source_instance_id"]))
-        print("  AD: {} -> {}".format(r["source_ad"], r["dest_ad"]))
-        print("  New: {} ({})".format(r["new_instance"], r["new_instance_id"]))
-        print("  New primary private IP: {}".format(r["new_primary_private_ip"]))
-        if r["lb_actions"]:
-            print("  LB restored:")
-            for a in r["lb_actions"]:
-                print("    - {} / {}: {} -> {} (old disabled={})".format(
-                    a["lb_name"], a["backend_set"], a["old_backend"], a["new_backend"], a["disabled_old"]
-                ))
-        else:
-            print("  LB restored: none / not detected")
-
-    print("\nAll done. 🚀")
 
 
 if __name__ == "__main__":
     try:
         main()
+        print("\n{} | All done. 🚀".format(_ts()))
     except KeyboardInterrupt:
         print("\n{} | Canceled by user.".format(_ts()))
         sys.exit(130)
