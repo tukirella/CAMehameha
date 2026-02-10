@@ -28,9 +28,26 @@ What it does?
 
 ______________________________________________________________________________________________________________________________________________________________________________________________
 
+### 3. 🐉 AD-to-AD Compute Migration Toolkit - BULMA  
+<img width="186" height="105" alt="image" src="https://github.com/user-attachments/assets/fa459be1-d8b8-4a6e-9179-304211c552a2" />
+
+BULMA helps teams safely migrate OCI compute instances from one Availability Domain (AD) to another using a backup & restore approach — without deleting or modifying the original server (beyond a controlled shutdown). Inspired by Bulma from Dragon Ball Z—the brilliant Capsule Corp engineer who builds practical tools and makes complex operations feel manageable—the script guides the user through an interactive flow in OCI Cloud Shell, then executes the migration with step-by-step visibility and progress (0%–100%) so operators always know exactly what’s happening during a critical cutover.
+
+What it does?
+
+- 🧭 Interactive selection — prompts the operator to choose which server(s) to migrate and select the destination AD.
+- 🛑 Controlled shutdown — safely stops the selected instance(s) to ensure consistent backups.
+- 💾 Backup & Restore migration — creates backups for the boot volume + all attached block volumes, then restores them into the destination AD.
+- 🚀 New instance creation — launches a new compute instance from the restored boot volume in the target AD (optionally with a new shape), keeping the original server intact.
+- 🌐 Network rebuild — recreates VNIC attachments using the same subnets and NSGs (“security groups”) as the source, including secondary VNICs when present.
+- 📦 Storage re-attachment — reattaches restored block volumes to the new instance, preserving attachment type (paravirtualized / iSCSI) where possible.
+- ⚖️ Load Balancer awareness (optional) — detects if the source instance is registered as a backend in an OCI classic Load Balancer and restores backend membership by adding the new instance IP:port back into the original backend set(s).
+- 📊 Maximum operator visibility — prints real-time progress for each step with overall % + current step %, including “what is happening now” messages so it’s safe to run under pressure.
+______________________________________________________________________________________________________________________________________________________________________________________________
 
 
-### 2. 🐉 Shape Upgrade Advisor - KING KAI 
+
+### 3. 🐉 Shape Upgrade Advisor - KING KAI 
 <img width="180" height="95" alt="image" src="https://github.com/user-attachments/assets/2f6da761-7d2a-4812-a853-1412c2ceae59" />
 
 KING KAI helps teams modernize and optimize OCI compute by scanning all compartments to identify workloads still running on legacy AMD (E2/E3/E4) and legacy Intel (Standard2) shapes, and then validating whether the recommended next-gen upgrade targets are actually available for the tenancy/region. **Inspired by Dragon Ball Z’s King Kai—the wise mentor** who spots inefficiencies and guides upgrades with clarity—the tool summarizes risk, sizing (oCPU/Memory), estimated baseline monthly cost, and upgrade feasibility into clean CSV + HTML reports, helping reduce waste and unblock modernization.
