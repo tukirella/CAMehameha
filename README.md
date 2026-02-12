@@ -38,14 +38,14 @@ BULMA helps teams safely migrate OCI compute instances from one Availability Dom
 
 What it does?
 
-- 🧭 Interactive selection — prompts the operator to choose which server(s) to migrate and select the destination AD.
-- 🛑 Controlled shutdown — safely stops the selected instance(s) to ensure consistent backups.
-- 💾 Backup & Restore migration — creates backups for the boot volume + all attached block volumes, then restores them into the destination AD.
-- 🚀 New instance creation — launches new compute instance from the restored boot volume in the target AD, keeping the original server intact.
-- 🌐 Network rebuild — recreates VNIC attachments using the same subnets and NSGs (“security groups”) as the source, including secondary VNICs when present.
-- 📦 Storage re-attachment — reattaches restored block volumes to the new instance, preserving attachment type where possible.
-- ⚖️ Load Balancer awareness (optional) — detects if the source instance is registered as a backend in an OCI classic Load Balancer and restores backend membership by adding the new instance
-- 📊 Maximum operator visibility — prints real-time progress for each step with overall % + current step %, including “what is happening now” messages so it’s safe to run under pressure.
+- 🧭 Interactive selection - prompts the operator to choose which server(s) to migrate and select the destination AD.
+- 🛑 Controlled shutdown - safely stops the selected instance(s) to ensure consistent backups.
+- 💾 Backup & Restore migration - creates backups for the boot volume + all attached block volumes, then restores them into the destination AD.
+- 🚀 New instance creation - launches new compute instance from the restored boot volume in the target AD, keeping the original server intact.
+- 🌐 Network rebuild - recreates VNIC attachments using the same subnets and NSGs as the source, including secondary VNICs when present.
+- 📦 Storage re-attachment - reattaches restored block volumes to the new instance, preserving attachment type where possible.
+- ⚖️ Load Balancer awareness (optional) - detects if the source instance is registered as a backend in an OCI classic Load Balancer and restores backend membership by adding the new instance
+- 📊 Maximum operator visibility - prints real-time progress for each step with overall % + current step %, including “what is happening now” messages so it’s safe to run under pressure.
 
 
 
