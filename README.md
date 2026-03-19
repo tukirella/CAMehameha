@@ -39,7 +39,7 @@ What it does?
 
 - 🧭 **Interactive selection** - prompts the operator to choose which server(s) to migrate and select the destination AD.
 - 🛑 **Controlled shutdown** - safely stops the selected instance(s) to ensure consistent backups.
-- 💾 **Backup & Restore migration** - creates backups for the boot volume + all attached block volumes, then restores them into the destination AD.
+- 💾 **Backup & Restore migration** - creates backups for the boot volume + all block volumes, then restores them into the selected AD.
 - 🚀 **New instance creation** - launches new instance from restored boot volume in the target AD, keeping the original server intact.
 - 🌐 **Network rebuild** - recreates VNIC attachments using same subnets and NSGs as the source, including secondary VNICs.
 - 📦 **Storage re-attachment** - reattaches restored block volumes to the new instance, preserving attachment type where possible.
