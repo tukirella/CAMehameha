@@ -684,150 +684,162 @@ def scan_compartment_shapes_only(
 
 
 # ------------------------------------------------------------
-#  HTML rendering
+#  HTML rendering — KAMI dark-theme style
 # ------------------------------------------------------------
-def css_for_risk(risk: str) -> str:
-    if risk == "Critical":
-        return "critrow"
-    if risk == "High":
-        return "highrow"
-    return "medrow"
+
+RISK_BADGE = {
+    "Critical": "<span class='risk-badge risk-crit'>Critical</span>",
+    "High":     "<span class='risk-badge risk-high'>High</span>",
+    "Medium":   "<span class='risk-badge risk-med'>Medium</span>",
+}
+
+AVAIL_ICON = {
+    "✅": "<span class='avail-ok'>✓</span>",
+    "❌": "<span class='avail-no'>✗</span>",
+}
+
+
+def risk_badge(risk: str) -> str:
+    return RISK_BADGE.get(risk, f"<span class='risk-badge risk-med'>{esc(risk)}</span>")
+
+
+def avail_cell(icon: str) -> str:
+    return AVAIL_ICON.get(icon, icon)
+
+
+def _html_table(title: str, accent_var: str, rows: List[Dict[str, Any]],
+                headers: List[str], row_fn) -> str:
+    count = len(rows)
+    rows_html = "\n".join(row_fn(r) for r in rows)
+    thead = "".join(f"<th>{h}</th>" for h in headers)
+    return f"""
+<div class="cat-section">
+  <div class="cat-header">
+    <div class="cat-title">
+      <span class="cat-dot" style="background:var({accent_var});box-shadow:0 0 8px var({accent_var})"></span>
+      <h2>{esc(title)}</h2>
+    </div>
+    <span class="cat-badge">{count} instance{'s' if count != 1 else ''}</span>
+  </div>
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead><tr>{thead}</tr></thead>
+      <tbody>{rows_html}</tbody>
+    </table>
+  </div>
+</div>"""
 
 
 def html_table_amd(rows: List[Dict[str, Any]]) -> str:
-    out: List[str] = []
-    out.append("<h2>AMD old instances</h2>")
-    out.append("<table>")
-    out.append(
-        "<tr>"
-        "<th>Risk</th>"
-        "<th>oCPU</th>"
-        "<th>Memory [GB]</th>"
-        "<th>Shape</th>"
-        "<th>Instance Name</th>"
-        "<th>Creator</th>"
-        "<th>Lifecycle</th>"
-        "<th>Region</th>"
-        "<th>Current Cost/mo</th>"
-        f"<th>{esc(E5_TARGET)} avail</th>"
-        f"<th>{esc(E6_TARGET)} avail</th>"
-        "<th>E5/E6.Flex monthly add-on</th>"
-        "</tr>"
-    )
+    headers = [
+        "Risk", "oCPU", "Mem GB", "Shape", "Instance Name",
+        "Creator", "Lifecycle", "Region", "Cost/mo",
+        f"E5 avail", f"E6 avail", "E5/E6 Δ/mo"
+    ]
 
-    for r in rows:
-        risk = r["risk"]
-        row_class = css_for_risk(risk)
-        out.append(
-            f"<tr class='{row_class}'>"
-            f"<td><strong>{esc(risk)}</strong></td>"
+    def row_fn(r):
+        risk = r.get("risk", "Medium")
+        e5 = avail_cell(r.get("e5_icon", "❌"))
+        e6 = avail_cell(r.get("e6_icon", "❌"))
+        delta = fmt_delta(r.get("e56_delta"))
+        delta_cls = "delta-pos" if r.get("e56_delta", 0) >= 0 else "delta-neg"
+        search_val = " ".join(filter(None, [
+            r.get("shape", ""), r.get("name", ""),
+            creator_for_html(r.get("creator", "")), r.get("region", "")
+        ])).lower()
+        return (
+            f"<tr class='row-{risk.lower()}' data-search='{esc(search_val)}'>"
+            f"<td>{risk_badge(risk)}</td>"
             f"<td class='num'>{esc(fmt_num(r.get('ocpus')))}</td>"
             f"<td class='num'>{esc(fmt_num(r.get('mem_gb')))}</td>"
-            f"<td class='mono'>{esc(r['shape'])}</td>"
-            f"<td>{esc(r['name'])}</td>"
-            f"<td>{esc(creator_for_html(r.get('creator','Unknown')))}</td>"
-            f"<td>{esc(r.get('lifecycle_state',''))}</td>"
-            f"<td class='mono'>{esc(r.get('region',''))}</td>"
-            f"<td class='num'>{esc(fmt_money(r.get('current_cost')))}</td>"
-            f"<td class='center'>{esc(r.get('e5_icon','❌'))}</td>"
-            f"<td class='center'>{esc(r.get('e6_icon','❌'))}</td>"
-            f"<td class='num'>{esc(fmt_delta(r.get('e56_delta')))}</td>"
+            f"<td class='mono shape-cell-amd'>{esc(r['shape'])}</td>"
+            f"<td class='name-cell'>{esc(r['name'])}</td>"
+            f"<td class='creator-cell'>{esc(creator_for_html(r.get('creator','Unknown')))}</td>"
+            f"<td><span class='lc-badge'>{esc(r.get('lifecycle_state',''))}</span></td>"
+            f"<td class='mono region-cell'>{esc(r.get('region',''))}</td>"
+            f"<td class='num cost-cell'>{esc(fmt_money(r.get('current_cost')))}</td>"
+            f"<td class='avail-cell'>{e5}</td>"
+            f"<td class='avail-cell'>{e6}</td>"
+            f"<td class='num {delta_cls}'>{esc(delta)}</td>"
             "</tr>"
         )
 
-    out.append("</table>")
-    return "\n".join(out)
+    return _html_table("AMD Old Instances", "--amd-accent", rows, headers, row_fn)
 
 
 def html_table_intel(rows: List[Dict[str, Any]]) -> str:
-    out: List[str] = []
-    out.append("<h2>Intel old instances</h2>")
-    out.append("<table>")
-    out.append(
-        "<tr>"
-        "<th>Risk</th>"
-        "<th>oCPU</th>"
-        "<th>Memory [GB]</th>"
-        "<th>Shape</th>"
-        "<th>Instance Name</th>"
-        "<th>Creator</th>"
-        "<th>Lifecycle</th>"
-        "<th>Region</th>"
-        "<th>Current Cost/mo</th>"
-        f"<th>{esc(STD3_TARGET)} avail</th>"
-        f"<th>{esc(OPT3_TARGET)} avail</th>"
-        "<th>Upgrade monthly add-on (best option)</th>"
-        "</tr>"
-    )
+    headers = [
+        "Risk", "oCPU", "Mem GB", "Shape", "Instance Name",
+        "Creator", "Lifecycle", "Region", "Cost/mo",
+        "STD3 avail", "OPT3 avail", "Best Δ/mo"
+    ]
 
-    for r in rows:
-        risk = r["risk"]
-        row_class = css_for_risk(risk)
-        out.append(
-            f"<tr class='{row_class}'>"
-            f"<td><strong>{esc(risk)}</strong></td>"
+    def row_fn(r):
+        risk = r.get("risk", "Medium")
+        s3 = avail_cell(r.get("std3_icon", "❌"))
+        o3 = avail_cell(r.get("opt3_icon", "❌"))
+        delta = fmt_delta(r.get("best_intel_delta"))
+        delta_cls = "delta-pos" if r.get("best_intel_delta", 0) >= 0 else "delta-neg"
+        search_val = " ".join(filter(None, [
+            r.get("shape", ""), r.get("name", ""),
+            creator_for_html(r.get("creator", "")), r.get("region", "")
+        ])).lower()
+        return (
+            f"<tr class='row-{risk.lower()}' data-search='{esc(search_val)}'>"
+            f"<td>{risk_badge(risk)}</td>"
             f"<td class='num'>{esc(fmt_num(r.get('ocpus')))}</td>"
             f"<td class='num'>{esc(fmt_num(r.get('mem_gb')))}</td>"
-            f"<td class='mono'>{esc(r['shape'])}</td>"
-            f"<td>{esc(r['name'])}</td>"
-            f"<td>{esc(creator_for_html(r.get('creator','Unknown')))}</td>"
-            f"<td>{esc(r.get('lifecycle_state',''))}</td>"
-            f"<td class='mono'>{esc(r.get('region',''))}</td>"
-            f"<td class='num'>{esc(fmt_money(r.get('current_cost')))}</td>"
-            f"<td class='center'>{esc(r.get('std3_icon','❌'))}</td>"
-            f"<td class='center'>{esc(r.get('opt3_icon','❌'))}</td>"
-            f"<td class='num'>{esc(fmt_delta(r.get('best_intel_delta')))}</td>"
+            f"<td class='mono shape-cell'>{esc(r['shape'])}</td>"
+            f"<td class='name-cell'>{esc(r['name'])}</td>"
+            f"<td class='creator-cell'>{esc(creator_for_html(r.get('creator','Unknown')))}</td>"
+            f"<td><span class='lc-badge'>{esc(r.get('lifecycle_state',''))}</span></td>"
+            f"<td class='mono region-cell'>{esc(r.get('region',''))}</td>"
+            f"<td class='num cost-cell'>{esc(fmt_money(r.get('current_cost')))}</td>"
+            f"<td class='avail-cell'>{s3}</td>"
+            f"<td class='avail-cell'>{o3}</td>"
+            f"<td class='num {delta_cls}'>{esc(delta)}</td>"
             "</tr>"
         )
 
-    out.append("</table>")
-    return "\n".join(out)
+    return _html_table("Intel Old Instances", "--intel-accent", rows, headers, row_fn)
 
 
 def html_table_arm(rows: List[Dict[str, Any]]) -> str:
     """ARM Ampere A1 instances — upgrade availability to A2 and A3."""
-    out: List[str] = []
-    out.append("<h2>ARM Ampere old instances</h2>")
-    out.append("<table>")
-    out.append(
-        "<tr>"
-        "<th>Risk</th>"
-        "<th>oCPU</th>"
-        "<th>Memory [GB]</th>"
-        "<th>Shape</th>"
-        "<th>Instance Name</th>"
-        "<th>Creator</th>"
-        "<th>Lifecycle</th>"
-        "<th>Region</th>"
-        "<th>Current Cost/mo</th>"
-        f"<th>{esc(A2_TARGET)} avail</th>"
-        f"<th>{esc(A3_TARGET)} avail</th>"
-        "<th>A2.Flex monthly add-on</th>"
-        "</tr>"
-    )
+    headers = [
+        "Risk", "oCPU", "Mem GB", "Shape", "Instance Name",
+        "Creator", "Lifecycle", "Region", "Cost/mo",
+        "A2 avail", "A3 avail", "A2 Δ/mo"
+    ]
 
-    for r in rows:
-        risk = r["risk"]
-        row_class = css_for_risk(risk)
-        out.append(
-            f"<tr class='{row_class}'>"
-            f"<td><strong>{esc(risk)}</strong></td>"
+    def row_fn(r):
+        risk = r.get("risk", "Medium")
+        a2 = avail_cell(r.get("a2_icon", "❌"))
+        a3 = avail_cell(r.get("a3_icon", "❌"))
+        delta = fmt_delta(r.get("a2_delta"))
+        delta_cls = "delta-pos" if r.get("a2_delta", 0) >= 0 else "delta-neg"
+        search_val = " ".join(filter(None, [
+            r.get("shape", ""), r.get("name", ""),
+            creator_for_html(r.get("creator", "")), r.get("region", "")
+        ])).lower()
+        return (
+            f"<tr class='row-{risk.lower()}' data-search='{esc(search_val)}'>"
+            f"<td>{risk_badge(risk)}</td>"
             f"<td class='num'>{esc(fmt_num(r.get('ocpus')))}</td>"
             f"<td class='num'>{esc(fmt_num(r.get('mem_gb')))}</td>"
-            f"<td class='mono'>{esc(r['shape'])}</td>"
-            f"<td>{esc(r['name'])}</td>"
-            f"<td>{esc(creator_for_html(r.get('creator','Unknown')))}</td>"
-            f"<td>{esc(r.get('lifecycle_state',''))}</td>"
-            f"<td class='mono'>{esc(r.get('region',''))}</td>"
-            f"<td class='num'>{esc(fmt_money(r.get('current_cost')))}</td>"
-            f"<td class='center'>{esc(r.get('a2_icon','❌'))}</td>"
-            f"<td class='center'>{esc(r.get('a3_icon','❌'))}</td>"
-            f"<td class='num'>{esc(fmt_delta(r.get('a2_delta')))}</td>"
+            f"<td class='mono shape-cell'>{esc(r['shape'])}</td>"
+            f"<td class='name-cell'>{esc(r['name'])}</td>"
+            f"<td class='creator-cell'>{esc(creator_for_html(r.get('creator','Unknown')))}</td>"
+            f"<td><span class='lc-badge'>{esc(r.get('lifecycle_state',''))}</span></td>"
+            f"<td class='mono region-cell'>{esc(r.get('region',''))}</td>"
+            f"<td class='num cost-cell'>{esc(fmt_money(r.get('current_cost')))}</td>"
+            f"<td class='avail-cell'>{a2}</td>"
+            f"<td class='avail-cell'>{a3}</td>"
+            f"<td class='num {delta_cls}'>{esc(delta)}</td>"
             "</tr>"
         )
 
-    out.append("</table>")
-    return "\n".join(out)
+    return _html_table("ARM Ampere Old Instances", "--arm-accent", rows, headers, row_fn)
 
 
 def sort_rows_for_html(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1047,72 +1059,446 @@ def main():
 
     print(f"🗒️ CSV report saved to: {csv_path}")
 
-    # --------------- Generate HTML ----------------
+    # --------------- Generate HTML (KAMI dark-theme) ----------------
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    amd_section   = html_table_amd(amd_rows)   if amd_rows   else '<div class="empty-note">No AMD old instances found.</div>'
+    intel_section = html_table_intel(intel_rows) if intel_rows else '<div class="empty-note">No Intel old instances found.</div>'
+    arm_section   = html_table_arm(arm_rows)   if arm_rows   else '<div class="empty-note">No ARM A1 instances found.</div>'
+
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>KING KAI - Shapes Upgrade Advisor</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KING KAI — Shapes Upgrade Advisor</title>
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&family=Exo+2:wght@300;400;600&display=swap" rel="stylesheet">
   <style>
-    body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background:#f9f9f9; margin: 20px; }}
-    h1 {{ color:#2c3e50; font-size:28px; margin-bottom: 6px; }}
-    p {{ font-size:14px; }}
-    .subtle {{ color:#555; font-size:12px; }}
+    :root {{
+      --bg:           #070d14;
+      --bg2:          #0c1520;
+      --bg3:          #111d2a;
+      --border:       #1a2e42;
+      --border2:      #243d56;
+      --accent:       #f0b429;
+      --accent2:      #00e5ff;
+      --text:         #c8dae8;
+      --text-dim:     #4a6a82;
+      --text-head:    #e8f4ff;
+      --crit:         #ff4d4d;
+      --high:         #f0b429;
+      --med:          #00c896;
+      --ok:           #00c896;
+      --no:           #ff4d4d;
+      --amd-accent:   #f0b429;
+      --intel-accent: #00e5ff;
+      --arm-accent:   #a78bfa;
+      --font-mono:    'Share Tech Mono', monospace;
+      --font-ui:      'Rajdhani', sans-serif;
+      --font-body:    'Exo 2', sans-serif;
+    }}
 
-    .cardwrap {{ display:flex; gap:14px; flex-wrap:wrap; margin-top: 14px; }}
-    .card {{ background:#fff; border:1px solid #ddd; border-radius:10px; padding:12px 14px; min-width:240px; box-shadow:0 1px 3px rgba(0,0,0,0.06); }}
-    .card h3 {{ margin:0 0 6px 0; font-size:14px; color:#2c3e50; }}
-    .card .big {{ font-size:18px; font-weight:700; }}
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
 
-    table {{ width:100%; border-collapse:collapse; margin-top:14px; }}
-    th, td {{ padding:10px; border:1px solid #ddd; text-align:left; font-size:13px; vertical-align: top; }}
-    th {{ background:#34495e; color:white; }}
-    tr:nth-child(even) {{ background:#f2f2f2; }}
+    body {{
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-body);
+      font-size: 13px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }}
 
-    .critrow {{ background:#f8d7da !important; }}
-    .highrow {{ background:#fdecea !important; }}
-    .medrow  {{ background:#fff4e5 !important; }}
+    body::before {{
+      content: '';
+      position: fixed; inset: 0; z-index: 0;
+      background-image:
+        linear-gradient(rgba(0,229,255,.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,229,255,.03) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+    }}
 
-    .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:12px; }}
-    .note {{ font-size:12px; color:#555; margin-top:10px; }}
-    .num {{ text-align:right; }}
-    .center {{ text-align:center; }}
+    .wrap {{ position: relative; z-index: 1; max-width: 1500px; margin: 0 auto; padding: 0 24px 60px; }}
+
+    /* ── Header ── */
+    .site-header {{
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 32px 0 24px;
+      border-bottom: 1px solid var(--border2);
+      margin-bottom: 32px;
+    }}
+    .logo-block {{ display: flex; align-items: center; gap: 18px; }}
+    .logo-glyph {{
+      width: 52px; height: 52px;
+      background: linear-gradient(135deg, #001a2e, #003050);
+      border: 1px solid var(--accent2);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-family: var(--font-mono);
+      color: var(--accent2);
+      font-size: 24px;
+      box-shadow: 0 0 20px rgba(0,229,255,.2), inset 0 0 10px rgba(0,229,255,.05);
+    }}
+    .logo-text h1 {{
+      font-family: var(--font-ui);
+      font-size: 26px; font-weight: 700; letter-spacing: 6px;
+      color: var(--text-head); text-transform: uppercase;
+    }}
+    .logo-text p {{
+      font-family: var(--font-mono);
+      font-size: 11px; color: var(--text-dim); letter-spacing: 2px;
+      text-transform: uppercase; margin-top: 2px;
+    }}
+    .header-meta {{
+      text-align: right;
+      font-family: var(--font-mono);
+      font-size: 11px; color: var(--text-dim); line-height: 1.8;
+    }}
+    .header-meta .ts {{ color: var(--accent2); }}
+    .header-meta .user {{ color: var(--text); }}
+
+    /* ── Search bar ── */
+    .search-wrap {{
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 0 32px;
+    }}
+    .search-box {{
+      position: relative;
+      width: 100%;
+      max-width: 520px;
+    }}
+    .search-box input {{
+      width: 100%;
+      background: rgba(0,229,255,.04);
+      border: 1px solid var(--accent2);
+      border-radius: 5px;
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      letter-spacing: 1px;
+      padding: 8px 36px 8px 14px;
+      outline: none;
+      transition: box-shadow .2s, background .2s;
+    }}
+    .search-box input::placeholder {{
+      color: var(--text-dim);
+      letter-spacing: 1.5px;
+    }}
+    .search-box input:focus {{
+      background: rgba(0,229,255,.07);
+      box-shadow: 0 0 12px rgba(0,229,255,.25);
+    }}
+    .search-icon {{
+      position: absolute;
+      right: 11px; top: 50%;
+      transform: translateY(-50%);
+      color: var(--accent2);
+      font-size: 13px;
+      pointer-events: none;
+      opacity: .7;
+    }}
+    .clear-btn {{
+      position: absolute;
+      right: 11px; top: 50%;
+      transform: translateY(-50%);
+      color: var(--text-dim);
+      font-size: 16px;
+      cursor: pointer;
+      display: none;
+      background: none;
+      border: none;
+      line-height: 1;
+      padding: 0;
+    }}
+    .clear-btn:hover {{ color: var(--accent2); }}
+    .search-count {{
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-dim);
+      text-align: center;
+      margin-top: 5px;
+      min-height: 14px;
+      letter-spacing: 1px;
+    }}
+    .search-count span {{ color: var(--accent2); }}
+    tr.search-hidden {{ display: none; }}
+
+    /* ── Summary cards ── */
+    .cards-wrap {{
+      display: flex; gap: 14px; flex-wrap: wrap;
+      margin-bottom: 36px;
+    }}
+    .card {{
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 20px;
+      min-width: 200px;
+      flex: 1;
+    }}
+    .card-label {{
+      font-family: var(--font-mono);
+      font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
+      color: var(--text-dim); margin-bottom: 6px;
+    }}
+    .card-value {{
+      font-family: var(--font-ui);
+      font-size: 22px; font-weight: 700;
+      color: var(--text-head);
+    }}
+    .card-sub {{
+      font-family: var(--font-mono);
+      font-size: 11px; color: var(--text-dim); margin-top: 4px;
+    }}
+    .card-sub span {{ color: var(--accent2); }}
+
+    /* ── Category section ── */
+    .cat-section {{
+      margin-bottom: 40px;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }}
+    .cat-header {{
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 24px;
+      background: linear-gradient(90deg, #0a1020, #070d14);
+      border-bottom: 1px solid var(--border2);
+    }}
+    .cat-title {{ display: flex; align-items: center; gap: 12px; }}
+    .cat-dot {{
+      width: 10px; height: 10px; border-radius: 50%;
+      animation: pulse 2s infinite;
+    }}
+    @keyframes pulse {{ 0%,100% {{ opacity: 1; }} 50% {{ opacity: .4; }} }}
+    .cat-icon {{ font-size: 18px; }}
+    .cat-title h2 {{
+      font-family: var(--font-ui);
+      font-size: 17px; font-weight: 600; letter-spacing: 3px;
+      color: var(--text-head); text-transform: uppercase;
+    }}
+    .cat-badge {{
+      font-family: var(--font-mono); font-size: 11px;
+      color: var(--text-dim); letter-spacing: 1px;
+      background: rgba(0,229,255,.06);
+      border: 1px solid rgba(0,229,255,.15);
+      border-radius: 4px; padding: 3px 10px;
+    }}
+
+    .table-wrap {{ overflow-x: auto; }}
+
+    /* ── Data table ── */
+    .data-table {{
+      width: 100%; border-collapse: collapse;
+      font-family: var(--font-mono); font-size: 12px;
+    }}
+    .data-table thead tr {{ background: rgba(0,229,255,.04); }}
+    .data-table th {{
+      padding: 9px 12px; text-align: left;
+      color: var(--text-dim); font-size: 10px;
+      letter-spacing: 1.5px; text-transform: uppercase;
+      border-bottom: 1px solid var(--border2);
+      font-weight: 400; white-space: nowrap;
+    }}
+    .data-table td {{
+      padding: 8px 12px; vertical-align: middle;
+      border-bottom: 1px solid rgba(26,46,66,.6);
+    }}
+    .data-table tbody tr:hover {{ background: rgba(0,229,255,.04); }}
+
+    /* row risk tints — no background differentiation, badge carries the risk signal */
+    .row-critical {{ }}
+    .row-high     {{ }}
+    .row-medium   {{ }}
+
+    /* ── Risk badge ── */
+    .risk-badge {{
+      display: inline-block; padding: 2px 9px;
+      border-radius: 4px; font-size: 10px; letter-spacing: 1px;
+      text-transform: uppercase; font-weight: 600;
+    }}
+    .risk-crit {{ background: rgba(255,77,77,.18); color: var(--crit); border: 1px solid rgba(255,77,77,.35); }}
+    .risk-high {{ background: rgba(240,180,41,.18); color: var(--high); border: 1px solid rgba(240,180,41,.35); }}
+    .risk-med  {{ background: rgba(0,200,150,.14); color: var(--med);  border: 1px solid rgba(0,200,150,.3); }}
+
+    /* ── Availability ── */
+    .avail-cell {{ text-align: center; }}
+    .avail-ok {{ color: var(--ok); font-size: 15px; font-weight: 700; }}
+    .avail-no {{ color: var(--no); font-size: 15px; font-weight: 700; }}
+
+    /* ── Delta ── */
+    .delta-pos {{ color: #ff8080; }}
+    .delta-neg {{ color: var(--ok); }}
+
+    /* ── Lifecycle badge ── */
+    .lc-badge {{
+      font-size: 10px; padding: 1px 6px; border-radius: 3px;
+      letter-spacing: 1px; text-transform: uppercase;
+      background: rgba(0,229,255,.08); color: var(--accent2);
+    }}
+
+    /* cell helpers */
+    .num {{ text-align: right; }}
+    .mono {{ font-family: var(--font-mono); }}
+    .shape-cell {{ color: var(--accent2); white-space: nowrap; font-size: 11px; }}
+    .shape-cell-amd {{ color: var(--accent2); white-space: nowrap; font-size: 11px; min-width: 160px; }}
+    .name-cell  {{ color: var(--text); min-width: 180px; word-break: break-word; }}
+    .creator-cell {{ color: var(--text-dim); }}
+    .region-cell  {{ color: var(--text-dim); font-size: 11px; }}
+    .cost-cell    {{ color: var(--text); font-weight: 600; }}
+
+    /* ── Pricing note ── */
+    .pricing-note {{
+      margin-bottom: 24px;
+      background: rgba(0,229,255,.04);
+      border: 1px solid rgba(0,229,255,.18);
+      border-radius: 8px;
+      padding: 12px 18px;
+      font-family: var(--font-mono);
+      font-size: 11px; color: var(--text-dim); letter-spacing: .5px;
+      line-height: 1.7;
+    }}
+    .pricing-note strong {{ color: var(--accent2); }}
+
+    .empty-note {{
+      padding: 24px;
+      font-family: var(--font-mono); font-size: 12px;
+      color: var(--text-dim); text-align: center; font-style: italic;
+    }}
+
+    /* ── Footer ── */
+    .footer {{
+      margin-top: 48px; padding-top: 20px;
+      border-top: 1px solid var(--border);
+      text-align: center;
+      font-family: var(--font-mono); font-size: 11px;
+      color: var(--text-dim); letter-spacing: 1px;
+    }}
+    .footer span {{ color: var(--accent); }}
   </style>
 </head>
 <body>
-  <h1>👑 KING KAI - Shapes Upgrade Advisor</h1>
-  <p><strong>Generated:</strong> {esc(generated)}</p>
-  <p><strong>Executed by:</strong> {esc(creator_for_html(executing_user))}</p>
-  <p><strong>Old instances found:</strong> {len(all_rows)}</p>
-  <p class="subtle">
-    Pricing baseline is based on <strong>Feb-2026 OCI pricing list</strong> (OCI Calculator-style monthly USD estimates).
-    Actual tenancy billing may differ (discounts, credits).
-  </p>
+<div class="wrap">
 
-  <div class="cardwrap">
+  <header class="site-header">
+    <div class="logo-block">
+      <div class="logo-glyph">🜲</div>
+      <div class="logo-text">
+        <h1>KING KAI</h1>
+        <p>OCI Shapes Upgrade Advisor</p>
+      </div>
+    </div>
+    <div class="search-wrap">
+      <div class="search-box">
+        <input type="text" id="globalSearch" placeholder="FILTER SHAPE, INSTANCE, CREATOR, REGION…" autocomplete="off" spellcheck="false">
+        <span class="search-icon" id="searchIcon">⌕</span>
+        <button class="clear-btn" id="clearBtn" title="Clear filter">✕</button>
+      </div>
+      <div class="search-count" id="searchCount"></div>
+    </div>
+    <div class="header-meta">
+      <div class="ts">{esc(generated)}</div>
+      <div>Executed by: <span class="user">{esc(creator_for_html(executing_user))}</span></div>
+      <div>Legacy instances found: <span style="color:var(--accent2)">{len(all_rows)}</span></div>
+    </div>
+  </header>
+
+  <div class="cards-wrap">
     <div class="card">
-      <h3>AMD old instances</h3>
-      <div class="big">E2={amd_counts["E2"]} | E3={amd_counts["E3"]} | E4={amd_counts["E4"]}</div>
+      <div class="card-label">AMD Legacy</div>
+      <div class="card-value">{amd_counts["E2"] + amd_counts["E3"] + amd_counts["E4"]}</div>
+      <div class="card-sub">E2: <span>{amd_counts["E2"]}</span> · E3: <span>{amd_counts["E3"]}</span> · E4: <span>{amd_counts["E4"]}</span></div>
     </div>
     <div class="card">
-      <h3>Intel old instances</h3>
-      <div class="big">Standard2={intel_counts["Standard2"]}</div>
+      <div class="card-label">Intel Legacy</div>
+      <div class="card-value">{intel_counts["Standard2"]}</div>
+      <div class="card-sub">Standard2: <span>{intel_counts["Standard2"]}</span></div>
     </div>
     <div class="card">
-      <h3>ARM Ampere old instances</h3>
-      <div class="big">A1.Flex={arm_counts["A1"]}</div>
+      <div class="card-label">ARM Legacy</div>
+      <div class="card-value">{arm_counts["A1"]}</div>
+      <div class="card-sub">A1.Flex: <span>{arm_counts["A1"]}</span></div>
     </div>
   </div>
 
-  {html_table_amd(amd_rows)   if amd_rows   else "<h2>AMD old instances</h2><p class='note'>No AMD old instances found.</p>"}
-  {html_table_intel(intel_rows) if intel_rows else "<h2>Intel old instances</h2><p class='note'>No Intel old instances found.</p>"}
-  {html_table_arm(arm_rows)   if arm_rows   else "<h2>ARM Ampere old instances</h2><p class='note'>No ARM A1 instances found.</p>"}
+  <div class="pricing-note">
+    <strong>ℹ Pricing baseline:</strong> Feb-2026 OCI Calculator monthly USD estimates.
+    Actual tenancy billing may differ (discounts, credits, reserved capacity).
+    ✓ / ✗ availability is best-effort (shape catalog + quota signals) — validate with app owner before migrating.
+    Creator column shows username only (email domain stripped); full value preserved in the CSV export.
+  </div>
 
-  <p class="note">
-    ✅/❌ availability is best-effort (shape catalog + quota signals). Always validate capacity with the application owner before changing shapes.<br>
-    Creator column in HTML shows username only (email domain stripped). Full creator value is preserved in the CSV export.
-  </p>
+  {amd_section}
+  {intel_section}
+  {arm_section}
+
+  <footer class="footer">
+    Generated by <span>KING KAI</span> · OCI Shapes Upgrade Advisor · {esc(generated)}
+  </footer>
+
+</div>
+
+<script>
+(function () {{
+  var input      = document.getElementById('globalSearch');
+  var clearBtn   = document.getElementById('clearBtn');
+  var searchIcon = document.getElementById('searchIcon');
+  var countEl    = document.getElementById('searchCount');
+
+  function applyFilter() {{
+    var term = input.value.trim().toLowerCase();
+
+    if (term) {{
+      clearBtn.style.display   = 'block';
+      searchIcon.style.display = 'none';
+    }} else {{
+      clearBtn.style.display   = 'none';
+      searchIcon.style.display = 'block';
+    }}
+
+    var allRows     = document.querySelectorAll('tr[data-search]');
+    var totalRows   = allRows.length;
+    var visibleRows = 0;
+
+    allRows.forEach(function (row) {{
+      if (!term || row.dataset.search.indexOf(term) !== -1) {{
+        row.style.display = '';
+        visibleRows++;
+      }} else {{
+        row.style.display = 'none';
+      }}
+    }});
+
+    // Show/hide entire cat-section if all its rows are hidden
+    document.querySelectorAll('.cat-section').forEach(function (section) {{
+      var sectionRows    = section.querySelectorAll('tr[data-search]');
+      var sectionVisible = Array.from(sectionRows).some(function (r) {{ return r.style.display !== 'none'; }});
+      section.style.display = (!term || sectionVisible) ? '' : 'none';
+    }});
+
+    // Update count badge
+    if (term) {{
+      countEl.innerHTML = '<span>' + visibleRows + '</span> of ' + totalRows + ' instances';
+    }} else {{
+      countEl.textContent = '';
+    }}
+  }}
+
+  input.addEventListener('input', applyFilter);
+
+  clearBtn.addEventListener('click', function () {{
+    input.value = '';
+    applyFilter();
+    input.focus();
+  }});
+}})();
+</script>
+
 </body>
 </html>
 """
