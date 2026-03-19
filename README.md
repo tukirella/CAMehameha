@@ -22,7 +22,6 @@ What it does?
 - 📄 **Generates a detailed CSV export** for offline analysis and governance.
 - 🌐 **Produces an interactive HTML report** with scores, findings, and configuration details per Load Balancer.
 - 🧹 **Helps teams eliminate waste**, reduce cost, and restore balance across OCI environments.
-<img width="700" height="452" alt="Screenshot 2026-01-20 173012" src="https://github.com/user-attachments/assets/9b8e5253-6172-4a90-beec-6d12729ea8f7" />
 
 
 
@@ -68,6 +67,3 @@ What it does?
 - 📈 **Adds baseline monthly cost estimates** for current shapes and potential monthly delta add-on if upgraded.
 - 📄 **Generates a CSV report** (includes OCID + compartment details) for deeper governance, automation, and follow-up actions.
 - 🌐 **Produces a clean HTML report** split into two sections (AMD / Intel) for fast executive visibility and upgrade planning.
-
-  <img width="942" height="270" alt="image" src="https://github.com/user-attachments/assets/be475b2a-14d6-43d1-b51b-1933b3b111e4" />
-
