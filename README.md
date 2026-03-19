@@ -1,4 +1,4 @@
-<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/da8367a3-756a-4923-8f15-872abae67ccb" />
+<img width="960" height="540" alt="image" src="https://github.com/user-attachments/assets/da8367a3-756a-4923-8f15-872abae67ccb" />
 
 ## CAMehameha
 
@@ -67,3 +67,14 @@ What it does?
 - 📈 **Adds baseline monthly cost estimates** for current shapes and potential monthly delta add-on if upgraded.
 - 📄 **Generates a CSV report** (includes OCID + compartment details) for deeper governance, automation, and follow-up actions.
 - 🌐 **Produces a clean HTML report** split into two sections (AMD / Intel) for fast executive visibility and upgrade planning.
+
+
+
+______________________________________________________________________________________________________________________________________________________________________________________________
+
+
+
+
+### 4. 🐉 Capacity Limit Observer - KAMI (TBR April-2026')
+
+<img width="185" height="105" alt="image" src="https://github.com/user-attachments/assets/ac7f02bc-336f-40c3-9e4e-ea8d2b0f40a7" />
