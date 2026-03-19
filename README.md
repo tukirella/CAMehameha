@@ -77,4 +77,5 @@ ________________________________________________________________________________
 
 ### 4. 🐉 Capacity Limit Observer - KAMI (TBR April-2026')
 
-<img width="185" height="105" alt="image" src="https://github.com/user-attachments/assets/ac7f02bc-336f-40c3-9e4e-ea8d2b0f40a7" />
+<img width="180" height="107" alt="image" src="https://github.com/user-attachments/assets/937de710-9368-4120-b285-8bd978eee0ae" />
+
