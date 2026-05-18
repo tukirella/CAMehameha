@@ -5,6 +5,11 @@
 Run:
   python3 king-kai.py
 
+At execution time, KING KAI lists the tenancy's subscribed regions and asks whether to scan:
+  1) one selected region
+  2) multiple selected regions
+  3) all subscribed regions
+
 Outputs (auto-named, UTC timestamp):
   - king-kaiYYYYMMDD-HHMM.html
   - king-kaiYYYYMMDD-HHMM.csv
@@ -14,8 +19,9 @@ Updates in this version:
      Upgrade targets: A2.Flex (with cost delta) and A3.Flex (availability check only).
      Separate ARM table in HTML/CSV with its own availability + delta columns.
   2) Creator HTML cleanup: strips email domain (e.g. mike.smith@company.com → mike.smith in HTML, full in CSV)
-  3) Region column: derived per-instance from availability_domain string (e.g. "eu-frankfurt-1:AD-1" → "eu-frankfurt-1").
-     Falls back to OCI config region. Works correctly across multi-region tenancies.
+  3) Multi-region selection: lists subscribed OCI regions, prompts the user to select one, multiple, or all regions,
+     and creates region-specific Compute/Limits clients for each selected region.
+  4) Region column: populated from the actual selected OCI region being scanned.
 
 Important:
   - "Creator" is best-effort from tags (createdBy/creator/owner...). If missing, shows "Unknown".
@@ -172,6 +178,187 @@ def collect_all_compartments(identity_client, tenancy_id: str) -> Tuple[List[str
 
     comp_ids.append(tenancy_id)
     return comp_ids, comp_name_by_id
+
+
+def config_for_region(config: Dict[str, Any], region_name: str) -> Dict[str, Any]:
+    """Return a copy of the OCI config pinned to a specific region."""
+    region_config = dict(config)
+    region_config["region"] = region_name
+    return region_config
+
+
+def list_subscribed_regions(identity_client, tenancy_id: str, config_region: str) -> List[Dict[str, Any]]:
+    """
+    Return subscribed OCI regions for the tenancy.
+    Uses Identity list_region_subscriptions; falls back to the config region if the call is unavailable.
+    """
+    regions: List[Dict[str, Any]] = []
+
+    try:
+        try:
+            response = oci.pagination.list_call_get_all_results(
+                identity_client.list_region_subscriptions,
+                tenancy_id=tenancy_id,
+            )
+            data = response.data
+        except TypeError:
+            # Older OCI SDK signatures may not accept tenancy_id as a keyword.
+            response = identity_client.list_region_subscriptions(tenancy_id)
+            data = response.data
+
+        for item in data:
+            region_name = getattr(item, "region_name", None)
+            if not region_name:
+                continue
+            regions.append({
+                "name": str(region_name),
+                "status": str(getattr(item, "status", "") or ""),
+                "is_home_region": bool(getattr(item, "is_home_region", False)),
+            })
+    except Exception as e:
+        print(f"⚠️ Could not list subscribed regions via Identity API: {e}")
+
+    # Ensure the configured region is always selectable as a safe fallback.
+    existing = {r["name"] for r in regions}
+    if config_region and config_region not in existing and config_region != "unknown":
+        regions.append({"name": config_region, "status": "CONFIG", "is_home_region": False})
+
+    # Deduplicate while preserving useful metadata.
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for r in regions:
+        deduped[r["name"]] = r
+
+    # Keep a stable, readable order: home region first, then alphabetical.
+    return sorted(deduped.values(), key=lambda r: (not r.get("is_home_region", False), r.get("name", "")))
+
+
+def _parse_region_numbers(raw: str, max_index: int) -> List[int]:
+    """Parse comma-separated region numbers like '2,3,6' into zero-based indexes."""
+    selected: List[int] = []
+    seen: Set[int] = set()
+
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if not token.isdigit():
+            raise ValueError(f"'{token}' is not a number")
+        idx = int(token) - 1
+        if idx < 0 or idx >= max_index:
+            raise ValueError(f"Region number {token} is outside the available range 1-{max_index}")
+        if idx not in seen:
+            selected.append(idx)
+            seen.add(idx)
+
+    if not selected:
+        raise ValueError("No region numbers were selected")
+    return selected
+
+
+def prompt_region_selection(subscribed_regions: List[Dict[str, Any]]) -> List[str]:
+    """Interactive region-selection flow for Cloud Shell / terminal execution."""
+    if not subscribed_regions:
+        print("❌ No subscribed regions were found and no config-region fallback is available. Exiting.")
+        sys.exit(1)
+
+    print("🌍 Subscribed OCI regions detected:")
+    for idx, region in enumerate(subscribed_regions, start=1):
+        badges: List[str] = []
+        if region.get("is_home_region"):
+            badges.append("home")
+        if region.get("status"):
+            badges.append(str(region.get("status")))
+        suffix = f" ({', '.join(badges)})" if badges else ""
+        print(f"  {idx:>2}) {region['name']}{suffix}")
+
+    print()
+    print("Select scan scope:")
+    print("  1) Scan one region")
+    print("  2) Scan multiple regions, for example: 2,3,6")
+    print("  3) Scan all subscribed regions")
+
+    selected_regions: List[str] = []
+    while True:
+        mode = input("Enter option 1, 2, or 3: ").strip()
+
+        if mode == "1":
+            raw = input("Enter the region number to scan: ").strip()
+            try:
+                indexes = _parse_region_numbers(raw, len(subscribed_regions))
+                if len(indexes) != 1:
+                    print("❌ Option 1 accepts exactly one region number.")
+                    continue
+                selected_regions = [subscribed_regions[indexes[0]]["name"]]
+                break
+            except ValueError as e:
+                print(f"❌ {e}")
+
+        elif mode == "2":
+            raw = input("Enter region numbers to scan, separated by commas: ").strip()
+            try:
+                indexes = _parse_region_numbers(raw, len(subscribed_regions))
+                selected_regions = [subscribed_regions[i]["name"] for i in indexes]
+                break
+            except ValueError as e:
+                print(f"❌ {e}")
+
+        elif mode == "3":
+            selected_regions = [r["name"] for r in subscribed_regions]
+            break
+
+        else:
+            print("❌ Invalid option. Please enter 1, 2, or 3.")
+
+    print()
+    print(f"Selected region(s): {', '.join(selected_regions)}")
+    confirm = input("Proceed with scan? [y/N]: ").strip().lower()
+    if confirm not in {"y", "yes"}:
+        print("Scan cancelled by user.")
+        sys.exit(0)
+
+    return selected_regions
+
+
+def resolve_regions_from_cli(args, subscribed_regions: List[Dict[str, Any]]) -> Optional[List[str]]:
+    """Optional non-interactive mode for automation/CI usage."""
+    subscribed_names = [r["name"] for r in subscribed_regions]
+    subscribed_set = set(subscribed_names)
+
+    if getattr(args, "all_regions", False):
+        if not subscribed_names:
+            print("❌ --all-regions was requested, but no subscribed regions were found. Exiting.")
+            sys.exit(1)
+        if not getattr(args, "yes", False):
+            print(f"Selected region(s): {', '.join(subscribed_names)}")
+            confirm = input("Proceed with scan? [y/N]: ").strip().lower()
+            if confirm not in {"y", "yes"}:
+                print("Scan cancelled by user.")
+                sys.exit(0)
+        return subscribed_names
+
+    raw_regions = getattr(args, "regions", None)
+    if not raw_regions:
+        return None
+
+    requested = [r.strip() for r in raw_regions.split(",") if r.strip()]
+    if not requested:
+        print("❌ --regions was provided but no region names were parsed. Exiting.")
+        sys.exit(1)
+
+    unknown = [r for r in requested if r not in subscribed_set]
+    if unknown:
+        print(f"❌ Region(s) not found in tenancy subscriptions: {', '.join(unknown)}")
+        print(f"Available region(s): {', '.join(subscribed_names)}")
+        sys.exit(1)
+
+    if not getattr(args, "yes", False):
+        print(f"Selected region(s): {', '.join(requested)}")
+        confirm = input("Proceed with scan? [y/N]: ").strip().lower()
+        if confirm not in {"y", "yes"}:
+            print("Scan cancelled by user.")
+            sys.exit(0)
+
+    return requested
 
 
 
@@ -612,10 +799,10 @@ def evaluate_upgrade_option(
 def scan_compartment_shapes_only(
     comp_id: str,
     compute_client,
-    config_region: str,
+    active_region: str,
     out_rows: List[Dict[str, Any]],
 ) -> int:
-    """Returns how many instances matched in this compartment."""
+    """Returns how many legacy-shape instances matched in this compartment for the active region."""
     before = len(out_rows)
 
     instances = oci.pagination.list_call_get_all_results(
@@ -651,8 +838,8 @@ def scan_compartment_shapes_only(
         cur_cost = current_monthly_cost(shape, ocpus, mem_gb)
         creator  = get_creator_from_tags(ff_tags, df_tags)
 
-        # FEATURE 3: derive region per-instance from the AD string, not from config
-        instance_region = region_from_ad(ad, config_region)
+        # Region is the actual OCI region being scanned with the region-specific Compute client.
+        instance_region = active_region
 
         # Determine category
         if is_amd_old(shape):
@@ -854,9 +1041,24 @@ def sort_rows_for_html(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 #  Main
 # ------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="👑 KING KAI — Shapes Upgrade Report (no flags required)")
+    parser = argparse.ArgumentParser(description="👑 KING KAI — Shapes Upgrade Report")
     parser.add_argument("--profile", default="DEFAULT", help="OCI CLI profile name from ~/.oci/config (default: DEFAULT)")
     parser.add_argument("--output-dir", default=".", help="Directory to write reports (default: current directory)")
+    parser.add_argument(
+        "--regions",
+        default=None,
+        help="Optional non-interactive mode: comma-separated OCI region names, e.g. eu-frankfurt-1,il-jerusalem-1",
+    )
+    parser.add_argument(
+        "--all-regions",
+        action="store_true",
+        help="Optional non-interactive mode: scan all subscribed regions",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation when using --regions or --all-regions",
+    )
     args = parser.parse_args()
 
     try:
@@ -870,12 +1072,8 @@ def main():
         print("❌ Couldn't find 'tenancy' in OCI config. Exiting.")
         sys.exit(1)
 
-    # FEATURE 3: config region used as fallback; actual per-instance region is derived from AD string
     config_region = config.get("region", "unknown")
-
-    identity_client = oci.identity.IdentityClient(config)
-    compute_client  = oci.core.ComputeClient(config)
-    limits_client   = oci.limits.LimitsClient(config)
+    base_identity_client = oci.identity.IdentityClient(config)
 
     # Resolve the executing user from Cloud Shell environment variables
     import os
@@ -884,7 +1082,7 @@ def main():
     cs_user_ocid = os.environ.get("OCI_CS_USER_OCID")
     if cs_user_ocid:
         try:
-            u = identity_client.get_user(cs_user_ocid).data
+            u = base_identity_client.get_user(cs_user_ocid).data
             executing_user = (
                 getattr(u, "name", None)
                 or getattr(u, "email", None)
@@ -904,29 +1102,104 @@ def main():
     csv_path  = f"{out_dir}/{base_name}.csv"
     html_path = f"{out_dir}/{base_name}.html"
 
-    compartments, comp_name_by_id = collect_all_compartments(identity_client, tenancy_id)
-    availability_domains = list_availability_domains(identity_client, tenancy_id)
+    subscribed_regions = list_subscribed_regions(base_identity_client, tenancy_id, config_region)
+    selected_regions = resolve_regions_from_cli(args, subscribed_regions)
+    if selected_regions is None:
+        selected_regions = prompt_region_selection(subscribed_regions)
+
+    compartments, comp_name_by_id = collect_all_compartments(base_identity_client, tenancy_id)
 
     print(f"👑 KING KAI scanning tenancy: {tenancy_id}")
-    print(f"🌍 Config region (fallback): {config_region}")
+    print(f"🌍 Config region: {config_region}")
+    print(f"🌍 Selected region(s): {', '.join(selected_regions)}")
     print(f"📦 Compartments to scan: {len(compartments)} (including root)")
     print(f"🧠 Legacy shapes tracked: {len(OLD_SHAPES_SET)}")
     print("-" * 70)
 
     all_rows: List[Dict[str, Any]] = []
-    total = len(compartments)
+    total_compartments = len(compartments)
 
-    for idx, comp_id in enumerate(compartments, start=1):
-        cname = comp_name_by_id.get(comp_id, comp_id)
-        print(f"[{idx:>3}/{total}] Scanning compartment: {cname} ({comp_id}) ... ", end="", flush=True)
-        found = 0
-        try:
-            found = scan_compartment_shapes_only(comp_id, compute_client, config_region, all_rows)
-            print(f"done (found {found})", flush=True)
-        except oci.exceptions.ServiceError as e:
-            print(f"skipped (ServiceError: {e.status})", flush=True)
-        except Exception as e:
-            print(f"skipped (Error: {e})", flush=True)
+    for region_idx, region_name in enumerate(selected_regions, start=1):
+        print()
+        print(f"🌍 [{region_idx}/{len(selected_regions)}] Scanning region: {region_name}")
+        print("-" * 70)
+
+        region_config = config_for_region(config, region_name)
+        region_identity_client = oci.identity.IdentityClient(region_config)
+        region_compute_client  = oci.core.ComputeClient(region_config)
+        region_limits_client   = oci.limits.LimitsClient(region_config)
+        availability_domains   = list_availability_domains(region_identity_client, tenancy_id)
+
+        region_rows_before = len(all_rows)
+
+        for idx, comp_id in enumerate(compartments, start=1):
+            cname = comp_name_by_id.get(comp_id, comp_id)
+            print(f"[{idx:>3}/{total_compartments}] Scanning compartment: {cname} ({comp_id}) ... ", end="", flush=True)
+            found = 0
+            try:
+                found = scan_compartment_shapes_only(comp_id, region_compute_client, region_name, all_rows)
+                print(f"done (found {found})", flush=True)
+            except oci.exceptions.ServiceError as e:
+                print(f"skipped (ServiceError: {e.status})", flush=True)
+            except Exception as e:
+                print(f"skipped (Error: {e})", flush=True)
+
+        region_rows = [r for r in all_rows[region_rows_before:] if r.get("region") == region_name]
+        print(f"🔎 Region scan complete: {region_name} | old instances found: {len(region_rows)}")
+
+        if not region_rows:
+            continue
+
+        print(f"🧪 Checking upgrade-shape availability in {region_name} ...")
+
+        # Build region-specific caches for upgrade availability checks.
+        ads_to_check: Set[str] = set([r["availability_domain"] for r in region_rows if r.get("availability_domain")]) or set(availability_domains)
+        shapes_cache_by_ad: Dict[str, Set[str]] = {}
+        for ad in sorted([a for a in ads_to_check if a]):
+            shapes_cache_by_ad[ad] = list_shapes_in_ad(region_compute_client, tenancy_id, ad)
+
+        service_name    = discover_compute_service_name(region_limits_client, tenancy_id)
+        all_limit_names = list_limit_names(region_limits_client, tenancy_id, service_name)
+
+        targets = [E5_TARGET, E6_TARGET, STD3_TARGET, OPT3_TARGET, A2_TARGET, A3_TARGET]
+        target_to_limits: Dict[str, List[str]] = {t: find_limit_names_for_target(all_limit_names, t) for t in targets}
+        ra_cache: Dict[Tuple[str, str, Optional[str]], Optional[Dict[str, Any]]] = {}
+
+        # Compute availability + deltas per instance, using only this region's clients/caches.
+        for r in region_rows:
+            ad       = r.get("availability_domain")
+            comp_id  = r.get("compartment_id", "")
+            ocpu     = r.get("ocpus")
+            mem_gb   = r.get("mem_gb")
+            cur_cost = r.get("current_cost")
+
+            if r.get("category") == "AMD":
+                e5_ok = evaluate_upgrade_option(E5_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, region_limits_client, service_name, ra_cache)
+                e6_ok = evaluate_upgrade_option(E6_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, region_limits_client, service_name, ra_cache)
+                r["e5_icon"]  = "✅" if e5_ok else "❌"
+                r["e6_icon"]  = "✅" if e6_ok else "❌"
+                e5_cost       = target_monthly_cost(E5_TARGET, ocpu, mem_gb)
+                r["e56_delta"] = round(e5_cost - cur_cost, 2) if (e5_cost is not None and cur_cost is not None) else None
+
+            elif r.get("category") == "Intel":
+                std3_ok = evaluate_upgrade_option(STD3_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, region_limits_client, service_name, ra_cache)
+                opt3_ok = evaluate_upgrade_option(OPT3_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, region_limits_client, service_name, ra_cache)
+                r["std3_icon"] = "✅" if std3_ok else "❌"
+                r["opt3_icon"] = "✅" if opt3_ok else "❌"
+                std3_cost  = target_monthly_cost(STD3_TARGET, ocpu, mem_gb)
+                opt3_cost  = target_monthly_cost(OPT3_TARGET, ocpu, mem_gb)
+                std3_delta = round(std3_cost - cur_cost, 2) if (std3_cost is not None and cur_cost is not None) else None
+                opt3_delta = round(opt3_cost - cur_cost, 2) if (opt3_cost is not None and cur_cost is not None) else None
+                candidates = [d for d in [std3_delta, opt3_delta] if d is not None]
+                r["best_intel_delta"] = min(candidates) if candidates else None
+
+            elif r.get("category") == "ARM":
+                a2_ok = evaluate_upgrade_option(A2_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, region_limits_client, service_name, ra_cache)
+                a3_ok = evaluate_upgrade_option(A3_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, region_limits_client, service_name, ra_cache)
+                r["a2_icon"]  = "✅" if a2_ok else "❌"
+                r["a3_icon"]  = "✅" if a3_ok else "❌"
+                a2_cost       = target_monthly_cost(A2_TARGET, ocpu, mem_gb)
+                r["a2_delta"] = round(a2_cost - cur_cost, 2) if (a2_cost is not None and cur_cost is not None) else None
 
     print("-" * 70)
     print(f"✅ Scan complete. Total old instances found: {len(all_rows)}")
@@ -951,55 +1224,6 @@ def main():
             intel_counts["Standard2"] += 1
         elif cat == "ARM":
             arm_counts["A1"] += 1
-
-    # Build caches for upgrade availability checks
-    ads_to_check: Set[str] = set([r["availability_domain"] for r in all_rows if r.get("availability_domain")]) or set(availability_domains)
-    shapes_cache_by_ad: Dict[str, Set[str]] = {}
-    for ad in sorted([a for a in ads_to_check if a]):
-        shapes_cache_by_ad[ad] = list_shapes_in_ad(compute_client, tenancy_id, ad)
-
-    service_name    = discover_compute_service_name(limits_client, tenancy_id)
-    all_limit_names = list_limit_names(limits_client, tenancy_id, service_name)
-
-    targets = [E5_TARGET, E6_TARGET, STD3_TARGET, OPT3_TARGET, A2_TARGET, A3_TARGET]
-    target_to_limits: Dict[str, List[str]] = {t: find_limit_names_for_target(all_limit_names, t) for t in targets}
-    ra_cache: Dict[Tuple[str, str, Optional[str]], Optional[Dict[str, Any]]] = {}
-
-    # Compute availability + deltas per instance
-    for r in all_rows:
-        ad       = r.get("availability_domain")
-        comp_id  = r.get("compartment_id", "")
-        ocpu     = r.get("ocpus")
-        mem_gb   = r.get("mem_gb")
-        cur_cost = r.get("current_cost")
-
-        if r.get("category") == "AMD":
-            e5_ok = evaluate_upgrade_option(E5_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, limits_client, service_name, ra_cache)
-            e6_ok = evaluate_upgrade_option(E6_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, limits_client, service_name, ra_cache)
-            r["e5_icon"]  = "✅" if e5_ok else "❌"
-            r["e6_icon"]  = "✅" if e6_ok else "❌"
-            e5_cost       = target_monthly_cost(E5_TARGET, ocpu, mem_gb)
-            r["e56_delta"] = round(e5_cost - cur_cost, 2) if (e5_cost is not None and cur_cost is not None) else None
-
-        elif r.get("category") == "Intel":
-            std3_ok = evaluate_upgrade_option(STD3_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, limits_client, service_name, ra_cache)
-            opt3_ok = evaluate_upgrade_option(OPT3_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, limits_client, service_name, ra_cache)
-            r["std3_icon"] = "✅" if std3_ok else "❌"
-            r["opt3_icon"] = "✅" if opt3_ok else "❌"
-            std3_cost  = target_monthly_cost(STD3_TARGET, ocpu, mem_gb)
-            opt3_cost  = target_monthly_cost(OPT3_TARGET, ocpu, mem_gb)
-            std3_delta = round(std3_cost - cur_cost, 2) if (std3_cost is not None and cur_cost is not None) else None
-            opt3_delta = round(opt3_cost - cur_cost, 2) if (opt3_cost is not None and cur_cost is not None) else None
-            candidates = [d for d in [std3_delta, opt3_delta] if d is not None]
-            r["best_intel_delta"] = min(candidates) if candidates else None
-
-        elif r.get("category") == "ARM":
-            a2_ok = evaluate_upgrade_option(A2_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, limits_client, service_name, ra_cache)
-            a3_ok = evaluate_upgrade_option(A3_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, limits_client, service_name, ra_cache)
-            r["a2_icon"]  = "✅" if a2_ok else "❌"
-            r["a3_icon"]  = "✅" if a3_ok else "❌"
-            a2_cost       = target_monthly_cost(A2_TARGET, ocpu, mem_gb)
-            r["a2_delta"] = round(a2_cost - cur_cost, 2) if (a2_cost is not None and cur_cost is not None) else None
 
     # HTML ordering
     amd_rows   = sort_rows_for_html([r for r in all_rows if r.get("category") == "AMD"])
@@ -1038,9 +1262,9 @@ def main():
                 "MemoryGB":    fmt_num(r.get("mem_gb")),
                 "Shape":       r.get("shape", ""),
                 "InstanceName": r.get("name", ""),
-                "Creator":     r.get("creator", "Unknown"),   # ← full value in CSV
+                "Creator":     r.get("creator", "Unknown"),   # full value in CSV
                 "Lifecycle":   r.get("lifecycle_state", ""),
-                "Region":      r.get("region", ""),           # ← FEATURE 3
+                "Region":      r.get("region", ""),
                 "CurrentCostMo": fmt_money(r.get("current_cost")),
                 f"{E5_TARGET}_avail":  e5_y,
                 f"{E6_TARGET}_avail":  e6_y,
@@ -1061,6 +1285,7 @@ def main():
 
     # --------------- Generate HTML (KAMI dark-theme) ----------------
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    selected_regions_text = ", ".join(selected_regions)
 
     amd_section   = html_table_amd(amd_rows)   if amd_rows   else '<div class="empty-note">No AMD old instances found.</div>'
     intel_section = html_table_intel(intel_rows) if intel_rows else '<div class="empty-note">No Intel old instances found.</div>'
@@ -1404,6 +1629,7 @@ def main():
     <div class="header-meta">
       <div class="ts">{esc(generated)}</div>
       <div>Executed by: <span class="user">{esc(creator_for_html(executing_user))}</span></div>
+      <div>Regions scanned: <span style="color:var(--accent2)">{esc(selected_regions_text)}</span></div>
       <div>Legacy instances found: <span style="color:var(--accent2)">{len(all_rows)}</span></div>
     </div>
   </header>
@@ -1429,7 +1655,7 @@ def main():
   <div class="pricing-note">
     <strong>ℹ Pricing baseline:</strong> Feb-2026 OCI Calculator monthly USD estimates.
     Actual tenancy billing may differ (discounts, credits, reserved capacity).
-    ✓ / ✗ availability is best-effort (shape catalog + quota signals) — validate with app owner before migrating.
+    ✓ / ✗ availability is best-effort (shape catalog + quota signals) and is checked with region-specific Compute/Limits clients.
     Creator column shows username only (email domain stripped); full value preserved in the CSV export.
   </div>
 
@@ -1508,7 +1734,6 @@ def main():
 
     print(f"🖼️ HTML report saved to: {html_path}")
     print(f"✅ Done. Output prefix: {base_name}")
-
 
 if __name__ == "__main__":
     main()
