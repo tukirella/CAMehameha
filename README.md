@@ -1,4 +1,4 @@
-<img width="960" height="540" alt="image" src="https://github.com/user-attachments/assets/da8367a3-756a-4923-8f15-872abae67ccb" />
+<img width="480" height="270" alt="image" src="https://github.com/user-attachments/assets/da8367a3-756a-4923-8f15-872abae67ccb" />
 
 ## CAMehameha
 
@@ -8,8 +8,7 @@ Here you will be able to find our Cloud Shell–ready scripts, tools, and small 
 
 
 
-### 1. 🐉 LoadBalancer Cleanse – Android16
-<img width="180" height="90" alt="image" src="https://github.com/user-attachments/assets/050bf7bb-872b-47cd-bdda-a4998e4e9f3a" />
+<img width="90" height="45" alt="image" src="https://github.com/user-attachments/assets/050bf7bb-872b-47cd-bdda-a4998e4e9f3a" /> **🐉LoadBalancer Cleanse (Jan-2026')**
 
 Helps to optimization utility that scans all compartments to detect abandoned, underutilized, or misconfigured Classic and Network Load Balancers.
 **Inspired by one of Dragon-Ball Z characters named "Android 16"**, a calm and precise nature, the tool analyzes listeners, backend sets, lifecycle state, age, and configuration health to calculate a “Ghost Score.” Results are delivered via detailed CSV and interactive HTML reports, helping teams eliminate waste, reduce cost, and restore balance across OCI environments.
@@ -30,8 +29,8 @@ ________________________________________________________________________________
 
 
 
-### 2. 🐉 AD-to-AD Compute Migration Toolkit - BULMA  
-<img width="186" height="105" alt="image" src="https://github.com/user-attachments/assets/fa459be1-d8b8-4a6e-9179-304211c552a2" />
+<img width="93" height="52" alt="image" src="https://github.com/user-attachments/assets/fa459be1-d8b8-4a6e-9179-304211c552a2" /> **🐉 AD-to-AD Compute Migration (Feb-2026')**
+
 
 BULMA helps teams safely migrate OCI compute instances from one Availability Domain (AD) to another using a backup & restore approach — without deleting or modifying the original server (beyond a controlled shutdown). **Inspired by Bulma from Dragon Ball-Z, a brilliant Corp engineer** who builds practical tools and makes complex operations feel manageable—the script guides the user through an interactive flow in OCI Cloud Shell, then executes the migration with step-by-step visibility and progress (0%–100%) so operators always know exactly what’s happening during a critical cutover.
 
@@ -53,8 +52,8 @@ ________________________________________________________________________________
 
 
 
-### 3. 🐉 Shape Upgrade Advisor - KING KAI
-<img width="180" height="95" alt="image" src="https://github.com/user-attachments/assets/2f6da761-7d2a-4812-a853-1412c2ceae59" />
+<img width="90" height="47" alt="image" src="https://github.com/user-attachments/assets/2f6da761-7d2a-4812-a853-1412c2ceae59" /> **🐉 Shape Upgrade Advisor (March-2026')**
+
 
 KING KAI helps teams modernize and optimize OCI compute by scanning all compartments to identify workloads still running on legacy AMD (E2/E3/E4) and legacy Intel (Standard2) shapes, and then validating whether the recommended next-gen upgrade targets are actually available for the tenancy/region. **Inspired by Dragon Ball Z’s King Kai—the wise mentor** who spots inefficiencies and guides upgrades with clarity—the tool summarizes risk, sizing (oCPU/Memory), estimated baseline monthly cost, and upgrade feasibility into clean CSV + HTML reports, helping reduce waste and unblock modernization.
 
@@ -75,9 +74,9 @@ ________________________________________________________________________________
 
 
 
-### 4. 🐉 Capacity Limit Observer - KAMI (April-2026')
+<img width="90" height="56" alt="image" src="https://github.com/user-attachments/assets/937de710-9368-4120-b285-8bd978eee0ae" /> **🐉 Capacity Limit Observer - KAMI (April-2026')**
 
-<img width="180" height="107" alt="image" src="https://github.com/user-attachments/assets/937de710-9368-4120-b285-8bd978eee0ae" />
+
 
 KAMI helps teams gain clear, multi-region visibility into OCI service limits, current usage, and capacity-risk signals by scanning OCI limits across regions and presenting them in a clean, searchable HTML dashboard. Instead of manually drilling through the OCI Console region by region and service by service, KAMI centralizes the view into one practical report that highlights where usage is approaching thresholds and where proactive action may be required.
 
@@ -91,4 +90,3 @@ Inspired by Dragon Ball’s Kami — the guardian who watches from above — the
 - 🔎 **Includes searchable and filterable views** to quickly locate specific services, regions, or limits.
 - 📄 **Generates structured outputs** that can support governance, reporting, escalation, and customer conversations.
 - 🌐 **Produces a clean HTML dashboard** for fast executive and operational visibility.
-- 🤝 Supports proactive approach by turning limits data into actionable planning insights.
