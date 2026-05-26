@@ -88,5 +88,5 @@ Inspired by Dragon Ball’s Kami — the guardian who watches from above — the
 - 🚦**Highlights threshold** risk signals, such as limits approaching 80% / 90% utilization.
 - 🧭 **Helps identify** where service-limit requests may be needed before deployments are blocked.
 - 🔎 **Includes searchable and filterable views** to quickly locate specific services, regions, or limits.
-- 📄 **Generates structured outputs** that can support governance, reporting, escalation, and customer conversations.
+- 📄 **Generates structured outputs** that can support governance, reporting and better capacity planning.
 - 🌐 **Produces a clean HTML dashboard** for fast executive and operational visibility.
