@@ -79,3 +79,16 @@ ________________________________________________________________________________
 
 <img width="180" height="107" alt="image" src="https://github.com/user-attachments/assets/937de710-9368-4120-b285-8bd978eee0ae" />
 
+KAMI helps teams gain clear, multi-region visibility into OCI service limits, current usage, and capacity-risk signals by scanning OCI limits across regions and presenting them in a clean, searchable HTML dashboard. Instead of manually drilling through the OCI Console region by region and service by service, KAMI centralizes the view into one practical report that highlights where usage is approaching thresholds and where proactive action may be required.
+
+Inspired by Dragon Ball’s Kami — the guardian who watches from above — the tool acts as a visibility layer for OCI limits and capacity awareness. It helps CAMs, cloud teams, and customer-facing stakeholders quickly identify limit pressure, prepare service-limit discussions, reduce deployment delays, and support better capacity planning across OCI regions.
+
+- 🔍 Scans OCI limits and usage across multiple regions to provide centralized visibility.
+- 🌍 Organizes results by region, service, and limit name for easier investigation and follow-up.
+- 📊 Shows current usage vs approved limits, helping teams understand remaining headroom.
+- 🚦Highlights threshold risk signals, such as limits approaching 80% / 90% utilization.
+- 🧭 Helps identify where service-limit requests may be needed before deployments are blocked.
+- 🔎 Includes searchable and filterable views to quickly locate specific services, regions, or limits.
+- 📄 Generates structured outputs that can support governance, reporting, escalation, and customer conversations.
+- 🌐 Produces a clean HTML dashboard for fast executive and operational visibility.
+- 🤝 Supports proactive CAM engagement by turning limits data into actionable planning insights.
