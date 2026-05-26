@@ -83,12 +83,12 @@ KAMI helps teams gain clear, multi-region visibility into OCI service limits, cu
 
 Inspired by Dragon Ball’s Kami — the guardian who watches from above — the tool acts as a visibility layer for OCI limits and capacity awareness. It helps CAMs, cloud teams, and customer-facing stakeholders quickly identify limit pressure, prepare service-limit discussions, reduce deployment delays, and support better capacity planning across OCI regions.
 
-- 🔍 Scans OCI limits and usage across multiple regions to provide centralized visibility.
-- 🌍 Organizes results by region, service, and limit name for easier investigation and follow-up.
-- 📊 Shows current usage vs approved limits, helping teams understand remaining headroom.
-- 🚦Highlights threshold risk signals, such as limits approaching 80% / 90% utilization.
-- 🧭 Helps identify where service-limit requests may be needed before deployments are blocked.
-- 🔎 Includes searchable and filterable views to quickly locate specific services, regions, or limits.
-- 📄 Generates structured outputs that can support governance, reporting, escalation, and customer conversations.
-- 🌐 Produces a clean HTML dashboard for fast executive and operational visibility.
-- 🤝 Supports proactive CAM engagement by turning limits data into actionable planning insights.
+- 🔍 **Scans OCI limits and usage** across multiple regions to provide centralized visibility.
+- 🌍 **Organizes results** by region, service, and limit name for easier investigation and follow-up.
+- 📊 **Shows current usage vs approved limits**, helping teams understand remaining headroom.
+- 🚦**Highlights threshold** risk signals, such as limits approaching 80% / 90% utilization.
+- 🧭 **Helps identify** where service-limit requests may be needed before deployments are blocked.
+- 🔎 **Includes searchable and filterable views** to quickly locate specific services, regions, or limits.
+- 📄 **Generates structured outputs** that can support governance, reporting, escalation, and customer conversations.
+- 🌐 **Produces a clean HTML dashboard** for fast executive and operational visibility.
+- 🤝 Supports proactive approach by turning limits data into actionable planning insights.
