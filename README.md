@@ -74,7 +74,7 @@ ________________________________________________________________________________
 
 
 
-<img width="90" height="56" alt="image" src="https://github.com/user-attachments/assets/937de710-9368-4120-b285-8bd978eee0ae" /> **🐉 Capacity Limit Observer - KAMI (April-2026')**
+<img width="90" height="56" alt="image" src="https://github.com/user-attachments/assets/937de710-9368-4120-b285-8bd978eee0ae" /> **🐉 Capacity Limit Observer (April-2026')**
 
 
 
@@ -98,5 +98,5 @@ ________________________________________________________________________________
 
 
 
-<img width="89" height="51" alt="image" src="https://github.com/user-attachments/assets/dafeebfd-18d0-41a4-be7f-2335b43c521d" /> **🐉 OCI OKE Limit LZ - (June-2026')**
+<img width="89" height="51" alt="image" src="https://github.com/user-attachments/assets/dafeebfd-18d0-41a4-be7f-2335b43c521d" /> **🐉 OCI OKE Limit LZ (June-2026')**
 
