@@ -10,8 +10,8 @@ Here you will be able to find our Cloud Shell–ready scripts, tools, and small 
 
 <img width="90" height="45" alt="image" src="https://github.com/user-attachments/assets/050bf7bb-872b-47cd-bdda-a4998e4e9f3a" /> **🐉LoadBalancer Cleanse (Jan-2026')**
 
-Helps to optimization utility that scans all compartments to detect abandoned, underutilized, or misconfigured Classic and Network Load Balancers.
-**Inspired by one of Dragon-Ball Z characters named "Android 16"**, a calm and precise nature, the tool analyzes listeners, backend sets, lifecycle state, age, and configuration health to calculate a “Ghost Score.” Results are delivered via detailed CSV and interactive HTML reports, helping teams eliminate waste, reduce cost, and restore balance across OCI environments.
+**Android16** Helps to optimization utility that scans all compartments to detect abandoned, underutilized, or misconfigured Classic and Network Load Balancers.
+Inspired by one of Dragon-Ball Z characters named "Android 16", a calm and precise nature, the tool analyzes listeners, backend sets, lifecycle state, age, and configuration health to calculate a “Ghost Score.” Results are delivered via detailed CSV and interactive HTML reports, helping teams eliminate waste, reduce cost, and restore balance across OCI environments.
 
 What it does?
 
@@ -32,7 +32,7 @@ ________________________________________________________________________________
 <img width="93" height="52" alt="image" src="https://github.com/user-attachments/assets/fa459be1-d8b8-4a6e-9179-304211c552a2" /> **🐉 AD-to-AD Compute Migration (Feb-2026')**
 
 
-BULMA helps teams safely migrate OCI compute instances from one Availability Domain (AD) to another using a backup & restore approach — without deleting or modifying the original server (beyond a controlled shutdown). **Inspired by Bulma from Dragon Ball-Z, a brilliant Corp engineer** who builds practical tools and makes complex operations feel manageable—the script guides the user through an interactive flow in OCI Cloud Shell, then executes the migration with step-by-step visibility and progress (0%–100%) so operators always know exactly what’s happening during a critical cutover.
+**BULMA** helps teams safely migrate OCI compute instances from one Availability Domain (AD) to another using a backup & restore approach — without deleting or modifying the original server (beyond a controlled shutdown). Inspired by Bulma from Dragon Ball-Z, a brilliant Corp engineer who builds practical tools and makes complex operations feel manageable—the script guides the user through an interactive flow in OCI Cloud Shell, then executes the migration with step-by-step visibility and progress (0%–100%) so operators always know exactly what’s happening during a critical cutover.
 
 What it does?
 
@@ -55,7 +55,7 @@ ________________________________________________________________________________
 <img width="90" height="47" alt="image" src="https://github.com/user-attachments/assets/2f6da761-7d2a-4812-a853-1412c2ceae59" /> **🐉 Shape Upgrade Advisor (March-2026')**
 
 
-KING KAI helps teams modernize and optimize OCI compute by scanning all compartments to identify workloads still running on legacy AMD (E2/E3/E4) and legacy Intel (Standard2) shapes, and then validating whether the recommended next-gen upgrade targets are actually available for the tenancy/region. **Inspired by Dragon Ball Z’s King Kai—the wise mentor** who spots inefficiencies and guides upgrades with clarity—the tool summarizes risk, sizing (oCPU/Memory), estimated baseline monthly cost, and upgrade feasibility into clean CSV + HTML reports, helping reduce waste and unblock modernization.
+**KING KAI** helps teams modernize and optimize OCI compute by scanning all compartments to identify workloads still running on legacy AMD (E2/E3/E4) and legacy Intel (Standard2) shapes, and then validating whether the recommended next-gen upgrade targets are actually available for the tenancy/region. Inspired by Dragon Ball Z’s King Kai—the wise mentor who spots inefficiencies and guides upgrades with clarity—the tool summarizes risk, sizing (oCPU/Memory), estimated baseline monthly cost, and upgrade feasibility into clean CSV + HTML reports, helping reduce waste and unblock modernization.
 
 What it does?
 
@@ -78,7 +78,7 @@ ________________________________________________________________________________
 
 
 
-KAMI helps teams gain clear, multi-region visibility into OCI service limits, current usage, and capacity-risk signals by scanning OCI limits across regions and presenting them in a clean, searchable HTML dashboard. Instead of manually drilling through the OCI Console region by region and service by service, KAMI centralizes the view into one practical report that highlights where usage is approaching thresholds and where proactive action may be required.
+**KAMI** helps teams gain clear, multi-region visibility into OCI service limits, current usage, and capacity-risk signals by scanning OCI limits across regions and presenting them in a clean, searchable HTML dashboard. Instead of manually drilling through the OCI Console region by region and service by service, KAMI centralizes the view into one practical report that highlights where usage is approaching thresholds and where proactive action may be required.
 
 Inspired by Dragon Ball’s Kami — the guardian who watches from above — the tool acts as a visibility layer for OCI limits and capacity awareness. It helps CAMs, cloud teams, and customer-facing stakeholders quickly identify limit pressure, prepare service-limit discussions, reduce deployment delays, and support better capacity planning across OCI regions.
 
@@ -90,3 +90,13 @@ Inspired by Dragon Ball’s Kami — the guardian who watches from above — the
 - 🔎 **Includes searchable and filterable views** to quickly locate specific services, regions, or limits.
 - 📄 **Generates structured outputs** that can support governance, reporting and better capacity planning.
 - 🌐 **Produces a clean HTML dashboard** for fast executive and operational visibility.
+
+
+
+______________________________________________________________________________________________________________________________________________________________________________________________
+
+
+
+
+<img width="89" height="51" alt="image" src="https://github.com/user-attachments/assets/dafeebfd-18d0-41a4-be7f-2335b43c521d" /> **🐉 OCI OKE Limit LZ - (June-2026')**
+
