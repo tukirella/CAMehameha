@@ -10,22 +10,30 @@ Usage (OCI Cloud Shell):
     python3 kami.py
     python3 kami.py --region eu-frankfurt-1
     python3 kami.py --all-regions
-    python3 kami.py --format table     (default)
+    python3 kami.py --format all       (default: HTML + CSV)
     python3 kami.py --format csv
 """
 
-import oci
 import argparse
-import sys
 import csv
 import io
-from datetime import datetime
+import re
+import sys
+from datetime import datetime, timezone
+from html import escape as html_escape
+
+import oci
 
 # ──────────────────────────────────────────────────────────────
 # ANSI colours (disabled automatically when piped / CSV mode)
 # ──────────────────────────────────────────────────────────────
 def supports_color():
     return sys.stdout.isatty()
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+REGION_VALUES_CACHE = {}
 
 class C:
     RESET   = "\033[0m"    if supports_color() else ""
@@ -43,6 +51,8 @@ class C:
 # ──────────────────────────────────────────────────────────────
 def bar(used, limit, width=20):
     """Visual usage bar."""
+    if used is None:
+        return f"{C.DIM}{'?' * width}{C.RESET}"
     if limit == 0:
         return f"{'─' * width}"
     pct = min(used / limit, 1.0)
@@ -52,6 +62,8 @@ def bar(used, limit, width=20):
     return f"{color}{'█' * filled}{C.DIM}{'░' * empty}{C.RESET}"
 
 def pct_label(used, limit):
+    if used is None:
+        return f"{C.YELLOW}  ERR{C.RESET}"
     if limit == 0:
         return f"{C.DIM}  N/A{C.RESET}"
     pct = used / limit * 100
@@ -64,7 +76,7 @@ def banner():
 ║   K A M I  ·  OCI Compute Service Limits Dashboard              ║
 ║   {C.RESET}{C.DIM}Surfacing your tenant limits, one shape at a time{C.RESET}{C.CYAN}{C.BOLD}             ║
 ╚══════════════════════════════════════════════════════════════════╝{C.RESET}
-  Generated : {C.YELLOW}{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC{C.RESET}
+  Generated : {C.YELLOW}{utc_now().strftime('%Y-%m-%d %H:%M:%S')} UTC{C.RESET}
 """)
 
 # ──────────────────────────────────────────────────────────────
@@ -96,7 +108,7 @@ def get_config_and_signer():
     if os.path.exists(token_file) and os.path.exists(config_file):
         try:
             cfg = oci.config.from_file(file_location=config_file)
-            with open(token_file) as f:
+            with open(token_file, encoding="utf-8") as f:
                 delegation_token = f.read().strip()
             signer = oci.auth.signers.InstancePrincipalsDelegationTokenSigner(
                 delegation_token=delegation_token
@@ -131,7 +143,7 @@ def get_config_and_signer():
         sys.exit(1)
 
 def list_regions(limits_client, tenancy_id):
-    """List subscribed regions via Limits API (no Identity permission needed)."""
+    """List subscribed regions via Identity API when permission is available."""
     # The limits endpoint itself tells us which regions exist via the tenancy
     # Best approach without Identity: use well-known OCI region list or
     # rely on the user passing --region. For --all-regions we still need identity.
@@ -180,12 +192,8 @@ def list_ads_from_limits(limits_client, tenancy_id):
 
     return sorted(ads)
 
-def list_ads(identity_client, tenancy_id, region_name):
-    ads = identity_client.list_availability_domains(tenancy_id).data
-    return [ad.name for ad in ads]
-
 def fetch_compute_limits(limits_client, tenancy_id, ad_name,
-                         _region_values_cache={}):
+                         _region_values_cache=None):
     """
     Fetch compute limit values scoped to a given AD.
     Uses list_limit_values then get_resource_availability in parallel.
@@ -199,6 +207,9 @@ def fetch_compute_limits(limits_client, tenancy_id, ad_name,
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    if _region_values_cache is None:
+        _region_values_cache = REGION_VALUES_CACHE
+
     # ── Step 1 : AD-scoped limit list ────────────────────────────
     try:
         ad_values = oci.pagination.list_call_get_all_results(
@@ -208,7 +219,8 @@ def fetch_compute_limits(limits_client, tenancy_id, ad_name,
             scope_type="AD",
             availability_domain=ad_name
         ).data
-    except oci.exceptions.ServiceError:
+    except oci.exceptions.ServiceError as e:
+        print(f"\n  {C.YELLOW}Warning: could not list AD-scoped limits for {ad_name}: {getattr(e, 'message', str(e))}{C.RESET}")
         ad_values = []
 
     # ── Step 2 : REGION-scoped limit list (cached across AD calls) ─
@@ -222,7 +234,8 @@ def fetch_compute_limits(limits_client, tenancy_id, ad_name,
                 service_name="compute",
                 scope_type="REGION"
             ).data
-        except oci.exceptions.ServiceError:
+        except oci.exceptions.ServiceError as e:
+            print(f"\n  {C.YELLOW}Warning: could not list region-scoped limits: {getattr(e, 'message', str(e))}{C.RESET}")
             _region_values_cache[cache_key] = []
 
     region_values = _region_values_cache[cache_key]
@@ -232,7 +245,7 @@ def fetch_compute_limits(limits_client, tenancy_id, ad_name,
     # ── Step 3 : parallel get_resource_availability ───────────────
     def _fetch_one(lv, scope):
         name      = lv.name
-        limit_val = lv.value if lv.value is not None else 0
+        limit_val = int(lv.value) if lv.value is not None else 0
         try:
             av_resp = limits_client.get_resource_availability(
                 compartment_id=tenancy_id,
@@ -242,12 +255,18 @@ def fetch_compute_limits(limits_client, tenancy_id, ad_name,
             )
             av = av_resp.data
             available = av.available if av.available is not None else limit_val
-            used = max(int(limit_val) - int(available), 0)
-        except oci.exceptions.ServiceError:
-            used = 0
-        return name, {"limit": int(limit_val), "used": used, "scope": scope}
+            used = max(limit_val - int(available), 0)
+            return name, {"limit": limit_val, "used": used, "scope": scope}
+        except oci.exceptions.ServiceError as e:
+            return name, {
+                "limit": limit_val,
+                "used": None,
+                "scope": scope,
+                "error": getattr(e, "message", str(e)),
+            }
 
     results = {}
+    skipped = 0
     # 20 workers: enough parallelism without hammering the rate limiter
     with ThreadPoolExecutor(max_workers=20) as pool:
         futures = {pool.submit(_fetch_one, lv, scope): (lv, scope)
@@ -257,7 +276,10 @@ def fetch_compute_limits(limits_client, tenancy_id, ad_name,
                 name, info = future.result()
                 results[name] = info
             except Exception:
-                pass  # individual failures are silently skipped
+                skipped += 1
+
+    if skipped:
+        print(f"\n  {C.YELLOW}Warning: skipped {skipped} unexpected availability lookup failure(s) for {ad_name}.{C.RESET}")
 
     return results
 
@@ -318,9 +340,11 @@ def print_region_table(region, ads_data):
                 limit = info["limit"]
                 scope = info["scope"]
                 if scope == "REGION":
-                    cell = f"REGION: {used}/{limit}"
+                    used_text = "ERR" if used is None else used
+                    cell = f"REGION: {used_text}/{limit}"
                 else:
-                    cell = f"{used:>4} / {limit:<6} {pct_label(used, limit)}"
+                    used_text = "ERR" if used is None else f"{used:>4}"
+                    cell = f"{used_text} / {limit:<6} {pct_label(used, limit)}"
                 row += f"  {cell}"
         print(row)
 
@@ -336,7 +360,6 @@ def print_region_table_detailed(region, ads_data):
         short = ad_name.split(":")[-1]
         print(f"\n  {C.BOLD}{C.MAGENTA}▶ Availability Domain : {short}{C.RESET}")
         print(f"  {'─'*64}")
-        fmt = f"  {{:<38}} {{:>5}} / {{:<6}}  {{}}  {{}}"
         print(f"  {C.BOLD}{'Resource':<38} {'Used':>5}   {'Limit':<6}  {'Bar':<22}  {'%'}{C.RESET}")
         print(f"  {'─'*64}")
 
@@ -351,7 +374,8 @@ def print_region_table_detailed(region, ads_data):
             limit = info["limit"]
             b     = bar(used, limit)
             p     = pct_label(used, limit)
-            print(f"  {C.CYAN}{name:<38}{C.RESET} {used:>5} / {limit:<6}  {b}  {p}")
+            used_text = "ERR" if used is None else f"{used:>5}"
+            print(f"  {C.CYAN}{name:<38}{C.RESET} {used_text} / {limit:<6}  {b}  {p}")
 
         if not found:
             print(f"  {C.DIM}  (no shape limits found){C.RESET}")
@@ -366,7 +390,7 @@ def export_csv(region, ads_data):
     for ad_name in sorted(ads_data.keys()):
         def csv_pct(n):
             v = ads_data[ad_name][n]
-            if not v["limit"]: return -1
+            if v["used"] is None or not v["limit"]: return -1
             return v["used"] / v["limit"]
         sorted_names = sorted(
             [n for n in ads_data[ad_name] if is_shape_related(n)],
@@ -378,8 +402,8 @@ def export_csv(region, ads_data):
             info  = ads_data[ad_name][name]
             used  = info["used"]
             limit = info["limit"]
-            pct   = round(used / limit * 100, 1) if limit else 0
-            writer.writerow([region, ad_name, name, used, limit, pct, info["scope"]])
+            pct   = round(used / limit * 100, 1) if used is not None and limit else ""
+            writer.writerow([region, ad_name, name, "" if used is None else used, limit, pct, info["scope"]])
 
     return output.getvalue()
 
@@ -391,11 +415,20 @@ def export_csv(region, ads_data):
 # ──────────────────────────────────────────────────────────────
 def render_html(all_html_data, tenancy_id, output_path):
     """Render a self-contained HTML dashboard from collected limits data."""
-    from datetime import datetime
 
     def pct(used, limit):
-        if not limit: return 0
+        if used is None or not limit: return 0
         return round(min(used / limit * 100, 100), 1)
+
+    def h(value):
+        return html_escape(str(value), quote=False)
+
+    def ha(value):
+        return html_escape(str(value), quote=True)
+
+    def html_id(value):
+        slug = re.sub(r"[^a-z0-9_-]+", "-", str(value).lower()).strip("-")
+        return slug or "region"
 
     def bar_color(p):
         if p == 0:    return "#2a3a4a"
@@ -411,7 +444,13 @@ def render_html(all_html_data, tenancy_id, output_path):
 
     # Build region/AD/limit rows — tab switcher when multiple regions
     num_regions  = len(all_html_data)
-    region_slugs = []   # used for tab IDs
+    slug_counts = {}
+
+    def unique_slug(value):
+        base = html_id(value)
+        count = slug_counts.get(base, 0)
+        slug_counts[base] = count + 1
+        return base if count == 0 else f"{base}-{count + 1}"
 
     def make_ad_blocks(ads_data):
         ad_blocks = ""
@@ -420,7 +459,7 @@ def render_html(all_html_data, tenancy_id, output_path):
             rows = ""
             def util_pct(item):
                 v = item[1]
-                if not v["limit"]: return -1
+                if v["used"] is None or not v["limit"]: return -1
                 return v["used"] / v["limit"]
             items = sorted(
                 [(n, v) for n, v in ads_data[ad_name].items() if is_shape_related(n)],
@@ -432,15 +471,18 @@ def render_html(all_html_data, tenancy_id, output_path):
                 u  = info["used"]
                 l  = info["limit"]
                 p  = pct(u, l)
-                bc = bar_color(p)
-                badge   = badge_class(p)
-                pct_str = f"{p}%" if l else "N/A"
-                bar_w   = f"{p}%" if l else "0%"
+                error = info.get("error")
+                bc = "#f0b429" if error else bar_color(p)
+                badge   = "warn" if error else badge_class(p)
+                pct_str = "ERR" if error else (f"{p}%" if l else "N/A")
+                bar_w   = f"{p}%" if l and u is not None else "0%"
+                used_text = "ERR" if u is None else u
+                title_attr = f' title="{ha(error)}"' if error else ""
                 rows += f"""
-                <tr data-shape="{name.lower()}" data-pct="{p}">
-                  <td class="res-name">{name}</td>
-                  <td class="num">{u}</td>
-                  <td class="num">{l if l else "—"}</td>
+                <tr data-shape="{ha(name.lower())}" data-pct="{p}"{title_attr}>
+                  <td class="res-name">{h(name)}</td>
+                  <td class="num">{h(used_text)}</td>
+                  <td class="num">{h(l) if l else "&mdash;"}</td>
                   <td class="bar-cell">
                     <div class="bar-track">
                       <div class="bar-fill" style="width:{bar_w};background:{bc}"></div>
@@ -452,7 +494,7 @@ def render_html(all_html_data, tenancy_id, output_path):
           <div class="ad-block">
             <div class="ad-header">
               <span class="ad-icon">◈</span>
-              <span class="ad-name">{short_ad}</span>
+              <span class="ad-name">{h(short_ad)}</span>
               <span class="ad-count">{len(items)} limits</span>
             </div>
             <table class="limits-table">
@@ -479,7 +521,7 @@ def render_html(all_html_data, tenancy_id, output_path):
           <div class="region-header">
             <div class="region-title">
               <span class="region-dot"></span>
-              <h2>{region}</h2>
+              <h2>{h(region)}</h2>
             </div>
             <span class="region-ad-count">{len(ads_data)} Availability Domain(s)</span>
           </div>
@@ -490,8 +532,7 @@ def render_html(all_html_data, tenancy_id, output_path):
         tab_buttons = ""
         tab_panels  = ""
         for idx, (region, ads_data) in enumerate(all_html_data):
-            slug      = region.replace(".", "-").replace("_", "-").lower()
-            region_slugs.append(slug)
+            slug      = unique_slug(region)
             active_btn   = "active" if idx == 0 else ""
             active_panel = "active" if idx == 0 else ""
             total_shapes = sum(
@@ -499,14 +540,14 @@ def render_html(all_html_data, tenancy_id, output_path):
                 for v in ads_data.values()
             )
             tab_buttons += f"""
-              <button class="region-tab {active_btn}" data-tab="{slug}">
+              <button class="region-tab {active_btn}" data-tab="{ha(slug)}">
                 <span class="tab-dot"></span>
-                <span class="tab-label">{region.upper()}</span>
+                <span class="tab-label">{h(region.upper())}</span>
                 <span class="tab-badge">{len(ads_data)} AD · {total_shapes} shapes</span>
               </button>"""
             ad_blocks = make_ad_blocks(ads_data)
             tab_panels += f"""
-          <div class="region-panel {active_panel}" id="panel-{slug}">
+          <div class="region-panel {active_panel}" id="panel-{ha(slug)}">
             <div class="ad-grid">{ad_blocks}</div>
           </div>"""
 
@@ -518,8 +559,9 @@ def render_html(all_html_data, tenancy_id, output_path):
           {tab_panels}
         </div>"""
 
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    short_tid = tenancy_id[:24] + "…" if len(tenancy_id) > 24 else tenancy_id
+    ts = utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
+    short_tid_raw = tenancy_id[:24] + "…" if len(tenancy_id) > 24 else tenancy_id
+    short_tid = h(short_tid_raw)
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1025,9 +1067,20 @@ def render_html(all_html_data, tenancy_id, output_path):
         if (!noRes) {{
           noRes = document.createElement('tr');
           noRes.className = 'filter-empty';
-          noRes.innerHTML = '<td colspan="5" class="empty">No shapes match <span style="color:var(--accent)">' + input.value.trim() + '</span></td>';
+          const cell = document.createElement('td');
+          cell.colSpan = 5;
+          cell.className = 'empty';
+          const label = document.createTextNode('No shapes match ');
+          const termSpan = document.createElement('span');
+          termSpan.style.color = 'var(--accent)';
+          termSpan.textContent = input.value.trim();
+          cell.appendChild(label);
+          cell.appendChild(termSpan);
+          noRes.appendChild(cell);
           tbody.appendChild(noRes);
         }} else {{
+          const termSpan = noRes.querySelector('span');
+          if (termSpan) termSpan.textContent = input.value.trim();
           noRes.style.display = '';
         }}
       }} else if (noRes) {{
@@ -1037,7 +1090,11 @@ def render_html(all_html_data, tenancy_id, output_path):
 
     // Update global count
     if (term) {{
-      countEl.innerHTML = '<span>' + totalVisible + '</span> of ' + totalRows + ' shapes';
+      countEl.replaceChildren();
+      const visibleSpan = document.createElement('span');
+      visibleSpan.textContent = totalVisible;
+      countEl.appendChild(visibleSpan);
+      countEl.appendChild(document.createTextNode(' of ' + totalRows + ' shapes'));
     }} else {{
       countEl.textContent = '';
     }}
@@ -1074,7 +1131,7 @@ def render_html(all_html_data, tenancy_id, output_path):
 </body>
 </html>"""
 
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
 
 # ──────────────────────────────────────────────────────────────
@@ -1082,9 +1139,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="KAMI – OCI Compute Service Limits Dashboard"
     )
-    parser.add_argument("--region",      help="Target a specific region (e.g. eu-frankfurt-1)")
-    parser.add_argument("--regions",     help="Comma-separated list of regions (e.g. eu-frankfurt-1,us-ashburn-1)")
-    parser.add_argument("--all-regions", action="store_true", help="Query all subscribed regions")
+    region_target = parser.add_mutually_exclusive_group()
+    region_target.add_argument("--region",      help="Target a specific region (e.g. eu-frankfurt-1)")
+    region_target.add_argument("--regions",     help="Comma-separated list of regions (e.g. eu-frankfurt-1,us-ashburn-1)")
+    region_target.add_argument("--all-regions", action="store_true", help="Query all subscribed regions")
     parser.add_argument("--format",      choices=["table", "detailed", "csv", "html", "all"], default="all",
                         help="Output format: table | detailed | csv | html | all (default: all — HTML + CSV)")
     # Timestamped filenames are generated at runtime (see below)
@@ -1095,7 +1153,7 @@ def main():
     args = parser.parse_args()
 
     banner()
-    _start_time = datetime.utcnow()
+    _start_time = utc_now()
 
     cfg, signer = get_config_and_signer()
 
@@ -1133,15 +1191,18 @@ def main():
         regions = [home]
 
     # Resolve timestamped output filenames
-    ts_stamp = datetime.utcnow().strftime("%Y-%m-%d-%H-%M")
+    ts_stamp = utc_now().strftime("%Y-%m-%d-%H-%M")
     html_path = args.output    or f"kami_{ts_stamp}.html"
     csv_path  = args.csv_output or f"kami_{ts_stamp}.csv"
 
     print(f"  Tenant   : {C.YELLOW}{tenancy_id}{C.RESET}")
     print(f"  Regions  : {C.YELLOW}{', '.join(regions)}{C.RESET}")
     print(f"  Mode     : {C.YELLOW}Compute shapes only{C.RESET}")
-    print(f"  HTML out : {C.CYAN}{html_path}{C.RESET}")
-    print(f"  CSV out  : {C.CYAN}{csv_path}{C.RESET}\n")
+    if args.format in ("html", "all"):
+        print(f"  HTML out : {C.CYAN}{html_path}{C.RESET}")
+    if args.format in ("csv", "all"):
+        print(f"  CSV out  : {C.CYAN}{csv_path}{C.RESET}")
+    print()
 
 
     all_csv_rows = []
@@ -1170,8 +1231,11 @@ def main():
             try:
                 ads_data[ad] = fetch_compute_limits(lim_client, tenancy_id, ad)
             except oci.exceptions.ServiceError as e:
-                print(f"\n  {C.YELLOW}⚠ Skipping {ad}: {e.message}{C.RESET}")
+                print(f"\n  {C.YELLOW}⚠ Skipping {ad}: {getattr(e, 'message', str(e))}{C.RESET}")
                 ads_data[ad] = {}
+            lookup_errors = sum(1 for item in ads_data[ad].values() if item.get("error"))
+            if lookup_errors:
+                print(f"\n  {C.YELLOW}⚠ {lookup_errors} availability lookup(s) for {short} returned errors; marked as ERR.{C.RESET}")
 
         print(" " * 60, end="\r")  # clear the "fetching" line
 
@@ -1185,7 +1249,7 @@ def main():
             print_region_table_detailed(region, ads_data)
 
     if args.format in ("csv", "all"):
-        with open(csv_path, "w") as cf:
+        with open(csv_path, "w", encoding="utf-8", newline="") as cf:
             cf.write("Region,Availability Domain,Resource,Used,Limit,Pct Used,Scope\n")
             for block in all_csv_rows:
                 lines = block.strip().splitlines()
@@ -1196,7 +1260,7 @@ def main():
         render_html(all_html_data, tenancy_id, html_path)
         print(f"  {C.GREEN}✓ HTML saved → {C.BOLD}{html_path}{C.RESET}")
 
-    _elapsed = datetime.utcnow() - _start_time
+    _elapsed = utc_now() - _start_time
     _mins, _secs = divmod(int(_elapsed.total_seconds()), 60)
     _elapsed_str = f"{_mins}m {_secs}s" if _mins else f"{_secs}s"
 
