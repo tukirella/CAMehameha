@@ -11,8 +11,8 @@ At execution time, KING KAI lists the tenancy's subscribed regions and asks whet
   3) all subscribed regions
 
 Outputs (auto-named, UTC timestamp):
-  - king-kaiYYYYMMDD-HHMM.html
-  - king-kaiYYYYMMDD-HHMM.csv
+  - king-kaiYYYYMMDD-HHMMSS.html
+  - king-kaiYYYYMMDD-HHMMSS.csv
 
 Updates in this version:
   1) ARM Ampere support: A1.Flex flagged as legacy (Critical risk).
@@ -36,6 +36,7 @@ import re
 import sys
 import html as htmlmod
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, Dict, Any, List, Set, Tuple
 
 
@@ -71,6 +72,10 @@ A2_TARGET   = "VM.Standard.A2.Flex"   # ARM upgrade target (with cost delta)
 A3_TARGET   = "VM.Standard.A3.Flex"   # ARM availability-only check column
 
 RISK_ORDER = {"Critical": 0, "High": 1, "Medium": 2}
+AVAIL_AVAILABLE = "available"
+AVAIL_UNAVAILABLE = "unavailable"
+AVAIL_UNKNOWN = "unknown"
+TERMINATED_STATES = {"TERMINATED", "TERMINATING"}
 
 
 # ------------------------------------------------------------
@@ -127,7 +132,7 @@ def esc(s: Any) -> str:
 
 
 def now_stamp_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
 
 def fmt_num(v: Optional[float]) -> str:
@@ -151,8 +156,18 @@ def fmt_delta(v: Optional[float]) -> str:
     return f"{sign}${abs(v):,.2f}"
 
 
-def bool_to_yn(v: bool) -> str:
-    return "Y" if v else "N"
+def availability_to_csv(status: Optional[str]) -> str:
+    if status == AVAIL_AVAILABLE:
+        return "Y"
+    if status == AVAIL_UNAVAILABLE:
+        return "N"
+    return "Unknown"
+
+
+def delta_class(value: Optional[float]) -> str:
+    if value is None:
+        return "delta-unknown"
+    return "delta-pos" if value >= 0 else "delta-neg"
 
 
 def collect_all_compartments(identity_client, tenancy_id: str) -> Tuple[List[str], Dict[str, str]]:
@@ -740,7 +755,7 @@ def find_limit_names_for_target(all_limit_names: Set[str], target_shape: str) ->
     return hits
 
 
-def list_shapes_in_ad(compute_client, tenancy_id: str, ad: str) -> Set[str]:
+def list_shapes_in_ad(compute_client, tenancy_id: str, ad: str) -> Optional[Set[str]]:
     try:
         shapes = oci.pagination.list_call_get_all_results(
             compute_client.list_shapes,
@@ -749,30 +764,35 @@ def list_shapes_in_ad(compute_client, tenancy_id: str, ad: str) -> Set[str]:
         ).data
         return {getattr(s, "shape", "") for s in shapes if getattr(s, "shape", "")}
     except Exception:
-        return set()
+        return None
 
 
 def evaluate_upgrade_option(
     target_shape: str,
     instance_ad: Optional[str],
     instance_compartment_id: str,
-    shapes_cache_by_ad: Dict[str, Set[str]],
+    required_ocpu: Optional[float],
+    required_mem_gb: Optional[float],
+    shapes_cache_by_ad: Dict[str, Optional[Set[str]]],
     target_to_limits: Dict[str, List[str]],
     limits_client,
     service_name: str,
     ra_cache: Dict[Tuple[str, str, Optional[str]], Optional[Dict[str, Any]]],
-) -> bool:
+) -> str:
     if not instance_ad:
-        return False
+        return AVAIL_UNKNOWN
 
-    ad_shapes = shapes_cache_by_ad.get(instance_ad, set())
+    ad_shapes = shapes_cache_by_ad.get(instance_ad)
+    if ad_shapes is None:
+        return AVAIL_UNKNOWN
     if target_shape not in ad_shapes:
-        return False
+        return AVAIL_UNAVAILABLE
 
     limit_names = target_to_limits.get(target_shape, [])
     if not limit_names:
-        return True
+        return AVAIL_UNKNOWN
 
+    saw_unknown = False
     for ln in limit_names:
         key = (instance_compartment_id, ln, instance_ad)
         if key not in ra_cache:
@@ -784,13 +804,32 @@ def evaluate_upgrade_option(
                 availability_domain=instance_ad
             )
         ra = ra_cache[key]
-        if ra:
-            eff = ra.get("effective_quota_value", None)
-            avail = ra.get("available", None)
-            if eff == 0 or avail == 0:
-                return False
+        if not ra:
+            saw_unknown = True
+            continue
 
-    return True
+        eff = ra.get("effective_quota_value", None)
+        avail = ra.get("available", None)
+        if eff == 0 or avail == 0:
+            return AVAIL_UNAVAILABLE
+
+        required = None
+        ln_lower = ln.lower()
+        if "core" in ln_lower:
+            required = required_ocpu
+        elif "memory" in ln_lower:
+            required = required_mem_gb
+
+        if required is not None and avail is not None:
+            try:
+                if float(avail) < float(required):
+                    return AVAIL_UNAVAILABLE
+            except (TypeError, ValueError):
+                saw_unknown = True
+        elif required is not None:
+            saw_unknown = True
+
+    return AVAIL_UNKNOWN if saw_unknown else AVAIL_AVAILABLE
 
 
 # ------------------------------------------------------------
@@ -801,6 +840,7 @@ def scan_compartment_shapes_only(
     compute_client,
     active_region: str,
     out_rows: List[Dict[str, Any]],
+    include_terminated: bool = False,
 ) -> int:
     """Returns how many legacy-shape instances matched in this compartment for the active region."""
     before = len(out_rows)
@@ -833,6 +873,9 @@ def scan_compartment_shapes_only(
             df_tags = getattr(full, "defined_tags", df_tags)
         except Exception:
             pass
+
+        if not include_terminated and str(lifecycle or "").upper() in TERMINATED_STATES:
+            continue
 
         ocpus, mem_gb = infer_ocpu_mem(shape, shape_config)
         cur_cost = current_monthly_cost(shape, ocpus, mem_gb)
@@ -881,8 +924,9 @@ RISK_BADGE = {
 }
 
 AVAIL_ICON = {
-    "✅": "<span class='avail-ok'>✓</span>",
-    "❌": "<span class='avail-no'>✗</span>",
+    AVAIL_AVAILABLE: "<span class='avail-ok' title='Available'>&check;</span>",
+    AVAIL_UNAVAILABLE: "<span class='avail-no' title='Unavailable'>&times;</span>",
+    AVAIL_UNKNOWN: "<span class='avail-unknown' title='Unknown'>?</span>",
 }
 
 
@@ -890,8 +934,8 @@ def risk_badge(risk: str) -> str:
     return RISK_BADGE.get(risk, f"<span class='risk-badge risk-med'>{esc(risk)}</span>")
 
 
-def avail_cell(icon: str) -> str:
-    return AVAIL_ICON.get(icon, icon)
+def avail_cell(status: Optional[str]) -> str:
+    return AVAIL_ICON.get(status or AVAIL_UNKNOWN, AVAIL_ICON[AVAIL_UNKNOWN])
 
 
 def _html_table(title: str, accent_var: str, rows: List[Dict[str, Any]],
@@ -926,10 +970,10 @@ def html_table_amd(rows: List[Dict[str, Any]]) -> str:
 
     def row_fn(r):
         risk = r.get("risk", "Medium")
-        e5 = avail_cell(r.get("e5_icon", "❌"))
-        e6 = avail_cell(r.get("e6_icon", "❌"))
+        e5 = avail_cell(r.get("e5_status"))
+        e6 = avail_cell(r.get("e6_status"))
         delta = fmt_delta(r.get("e56_delta"))
-        delta_cls = "delta-pos" if r.get("e56_delta", 0) >= 0 else "delta-neg"
+        delta_cls = delta_class(r.get("e56_delta"))
         search_val = " ".join(filter(None, [
             r.get("shape", ""), r.get("name", ""),
             creator_for_html(r.get("creator", "")), r.get("region", "")
@@ -963,10 +1007,10 @@ def html_table_intel(rows: List[Dict[str, Any]]) -> str:
 
     def row_fn(r):
         risk = r.get("risk", "Medium")
-        s3 = avail_cell(r.get("std3_icon", "❌"))
-        o3 = avail_cell(r.get("opt3_icon", "❌"))
+        s3 = avail_cell(r.get("std3_status"))
+        o3 = avail_cell(r.get("opt3_status"))
         delta = fmt_delta(r.get("best_intel_delta"))
-        delta_cls = "delta-pos" if r.get("best_intel_delta", 0) >= 0 else "delta-neg"
+        delta_cls = delta_class(r.get("best_intel_delta"))
         search_val = " ".join(filter(None, [
             r.get("shape", ""), r.get("name", ""),
             creator_for_html(r.get("creator", "")), r.get("region", "")
@@ -1001,10 +1045,10 @@ def html_table_arm(rows: List[Dict[str, Any]]) -> str:
 
     def row_fn(r):
         risk = r.get("risk", "Medium")
-        a2 = avail_cell(r.get("a2_icon", "❌"))
-        a3 = avail_cell(r.get("a3_icon", "❌"))
+        a2 = avail_cell(r.get("a2_status"))
+        a3 = avail_cell(r.get("a3_status"))
         delta = fmt_delta(r.get("a2_delta"))
-        delta_cls = "delta-pos" if r.get("a2_delta", 0) >= 0 else "delta-neg"
+        delta_cls = delta_class(r.get("a2_delta"))
         search_val = " ".join(filter(None, [
             r.get("shape", ""), r.get("name", ""),
             creator_for_html(r.get("creator", "")), r.get("region", "")
@@ -1044,12 +1088,13 @@ def main():
     parser = argparse.ArgumentParser(description="👑 KING KAI — Shapes Upgrade Report")
     parser.add_argument("--profile", default="DEFAULT", help="OCI CLI profile name from ~/.oci/config (default: DEFAULT)")
     parser.add_argument("--output-dir", default=".", help="Directory to write reports (default: current directory)")
-    parser.add_argument(
+    region_group = parser.add_mutually_exclusive_group()
+    region_group.add_argument(
         "--regions",
         default=None,
         help="Optional non-interactive mode: comma-separated OCI region names, e.g. eu-frankfurt-1,il-jerusalem-1",
     )
-    parser.add_argument(
+    region_group.add_argument(
         "--all-regions",
         action="store_true",
         help="Optional non-interactive mode: scan all subscribed regions",
@@ -1058,6 +1103,11 @@ def main():
         "--yes",
         action="store_true",
         help="Skip confirmation when using --regions or --all-regions",
+    )
+    parser.add_argument(
+        "--include-terminated",
+        action="store_true",
+        help="Include TERMINATED and TERMINATING instances in the report",
     )
     args = parser.parse_args()
 
@@ -1098,9 +1148,10 @@ def main():
 
     stamp    = now_stamp_utc()
     base_name = f"king-kai{stamp}"
-    out_dir  = args.output_dir.rstrip("/")
-    csv_path  = f"{out_dir}/{base_name}.csv"
-    html_path = f"{out_dir}/{base_name}.html"
+    out_dir = Path(args.output_dir).expanduser()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir / f"{base_name}.csv"
+    html_path = out_dir / f"{base_name}.html"
 
     subscribed_regions = list_subscribed_regions(base_identity_client, tenancy_id, config_region)
     selected_regions = resolve_regions_from_cli(args, subscribed_regions)
@@ -1137,7 +1188,13 @@ def main():
             print(f"[{idx:>3}/{total_compartments}] Scanning compartment: {cname} ({comp_id}) ... ", end="", flush=True)
             found = 0
             try:
-                found = scan_compartment_shapes_only(comp_id, region_compute_client, region_name, all_rows)
+                found = scan_compartment_shapes_only(
+                    comp_id,
+                    region_compute_client,
+                    region_name,
+                    all_rows,
+                    include_terminated=args.include_terminated,
+                )
                 print(f"done (found {found})", flush=True)
             except oci.exceptions.ServiceError as e:
                 print(f"skipped (ServiceError: {e.status})", flush=True)
@@ -1154,7 +1211,7 @@ def main():
 
         # Build region-specific caches for upgrade availability checks.
         ads_to_check: Set[str] = set([r["availability_domain"] for r in region_rows if r.get("availability_domain")]) or set(availability_domains)
-        shapes_cache_by_ad: Dict[str, Set[str]] = {}
+        shapes_cache_by_ad: Dict[str, Optional[Set[str]]] = {}
         for ad in sorted([a for a in ads_to_check if a]):
             shapes_cache_by_ad[ad] = list_shapes_in_ad(region_compute_client, tenancy_id, ad)
 
@@ -1174,18 +1231,26 @@ def main():
             cur_cost = r.get("current_cost")
 
             if r.get("category") == "AMD":
-                e5_ok = evaluate_upgrade_option(E5_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, region_limits_client, service_name, ra_cache)
-                e6_ok = evaluate_upgrade_option(E6_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, region_limits_client, service_name, ra_cache)
-                r["e5_icon"]  = "✅" if e5_ok else "❌"
-                r["e6_icon"]  = "✅" if e6_ok else "❌"
+                r["e5_status"] = evaluate_upgrade_option(
+                    E5_TARGET, ad, comp_id, ocpu, mem_gb, shapes_cache_by_ad,
+                    target_to_limits, region_limits_client, service_name, ra_cache
+                )
+                r["e6_status"] = evaluate_upgrade_option(
+                    E6_TARGET, ad, comp_id, ocpu, mem_gb, shapes_cache_by_ad,
+                    target_to_limits, region_limits_client, service_name, ra_cache
+                )
                 e5_cost       = target_monthly_cost(E5_TARGET, ocpu, mem_gb)
                 r["e56_delta"] = round(e5_cost - cur_cost, 2) if (e5_cost is not None and cur_cost is not None) else None
 
             elif r.get("category") == "Intel":
-                std3_ok = evaluate_upgrade_option(STD3_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, region_limits_client, service_name, ra_cache)
-                opt3_ok = evaluate_upgrade_option(OPT3_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, region_limits_client, service_name, ra_cache)
-                r["std3_icon"] = "✅" if std3_ok else "❌"
-                r["opt3_icon"] = "✅" if opt3_ok else "❌"
+                r["std3_status"] = evaluate_upgrade_option(
+                    STD3_TARGET, ad, comp_id, ocpu, mem_gb, shapes_cache_by_ad,
+                    target_to_limits, region_limits_client, service_name, ra_cache
+                )
+                r["opt3_status"] = evaluate_upgrade_option(
+                    OPT3_TARGET, ad, comp_id, ocpu, mem_gb, shapes_cache_by_ad,
+                    target_to_limits, region_limits_client, service_name, ra_cache
+                )
                 std3_cost  = target_monthly_cost(STD3_TARGET, ocpu, mem_gb)
                 opt3_cost  = target_monthly_cost(OPT3_TARGET, ocpu, mem_gb)
                 std3_delta = round(std3_cost - cur_cost, 2) if (std3_cost is not None and cur_cost is not None) else None
@@ -1194,10 +1259,14 @@ def main():
                 r["best_intel_delta"] = min(candidates) if candidates else None
 
             elif r.get("category") == "ARM":
-                a2_ok = evaluate_upgrade_option(A2_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, region_limits_client, service_name, ra_cache)
-                a3_ok = evaluate_upgrade_option(A3_TARGET, ad, comp_id, shapes_cache_by_ad, target_to_limits, region_limits_client, service_name, ra_cache)
-                r["a2_icon"]  = "✅" if a2_ok else "❌"
-                r["a3_icon"]  = "✅" if a3_ok else "❌"
+                r["a2_status"] = evaluate_upgrade_option(
+                    A2_TARGET, ad, comp_id, ocpu, mem_gb, shapes_cache_by_ad,
+                    target_to_limits, region_limits_client, service_name, ra_cache
+                )
+                r["a3_status"] = evaluate_upgrade_option(
+                    A3_TARGET, ad, comp_id, ocpu, mem_gb, shapes_cache_by_ad,
+                    target_to_limits, region_limits_client, service_name, ra_cache
+                )
                 a2_cost       = target_monthly_cost(A2_TARGET, ocpu, mem_gb)
                 r["a2_delta"] = round(a2_cost - cur_cost, 2) if (a2_cost is not None and cur_cost is not None) else None
 
@@ -1230,7 +1299,7 @@ def main():
     intel_rows = sort_rows_for_html([r for r in all_rows if r.get("category") == "Intel"])
     arm_rows   = sort_rows_for_html([r for r in all_rows if r.get("category") == "ARM"])
 
-    # --------------- Generate CSV (Y/N availability, full creator) ----------------
+    # --------------- Generate CSV (Y/N/Unknown availability, full creator) ----------------
     with open(csv_path, mode="w", newline="", encoding="utf-8") as csvfile:
         fieldnames = [
             "Category", "Risk", "oCPU", "MemoryGB", "Shape", "InstanceName", "Creator", "Lifecycle",
@@ -1248,12 +1317,12 @@ def main():
             comp_id = r.get("compartment_id", "")
             cat     = r.get("category", "")
 
-            e5_y  = bool_to_yn(r.get("e5_icon",   "❌") == "✅") if cat == "AMD"   else ""
-            e6_y  = bool_to_yn(r.get("e6_icon",   "❌") == "✅") if cat == "AMD"   else ""
-            s3_y  = bool_to_yn(r.get("std3_icon", "❌") == "✅") if cat == "Intel" else ""
-            o3_y  = bool_to_yn(r.get("opt3_icon", "❌") == "✅") if cat == "Intel" else ""
-            a2_y  = bool_to_yn(r.get("a2_icon",   "❌") == "✅") if cat == "ARM"   else ""
-            a3_y  = bool_to_yn(r.get("a3_icon",   "❌") == "✅") if cat == "ARM"   else ""
+            e5_y  = availability_to_csv(r.get("e5_status"))   if cat == "AMD"   else ""
+            e6_y  = availability_to_csv(r.get("e6_status"))   if cat == "AMD"   else ""
+            s3_y  = availability_to_csv(r.get("std3_status")) if cat == "Intel" else ""
+            o3_y  = availability_to_csv(r.get("opt3_status")) if cat == "Intel" else ""
+            a2_y  = availability_to_csv(r.get("a2_status"))   if cat == "ARM"   else ""
+            a3_y  = availability_to_csv(r.get("a3_status"))   if cat == "ARM"   else ""
 
             writer.writerow({
                 "Category":    cat,
@@ -1555,10 +1624,12 @@ def main():
     .avail-cell {{ text-align: center; }}
     .avail-ok {{ color: var(--ok); font-size: 15px; font-weight: 700; }}
     .avail-no {{ color: var(--no); font-size: 15px; font-weight: 700; }}
+    .avail-unknown {{ color: var(--text-dim); font-size: 14px; font-weight: 700; }}
 
     /* ── Delta ── */
     .delta-pos {{ color: #ff8080; }}
     .delta-neg {{ color: var(--ok); }}
+    .delta-unknown {{ color: var(--text-dim); }}
 
     /* ── Lifecycle badge ── */
     .lc-badge {{
@@ -1655,7 +1726,7 @@ def main():
   <div class="pricing-note">
     <strong>ℹ Pricing baseline:</strong> Feb-2026 OCI Calculator monthly USD estimates.
     Actual tenancy billing may differ (discounts, credits, reserved capacity).
-    ✓ / ✗ availability is best-effort (shape catalog + quota signals) and is checked with region-specific Compute/Limits clients.
+    &check; / &times; / ? availability is best-effort (shape catalog + quota signals) and is checked with region-specific Compute/Limits clients.
     Creator column shows username only (email domain stripped); full value preserved in the CSV export.
   </div>
 
