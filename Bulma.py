@@ -28,8 +28,12 @@ Notes:
 """
 
 import argparse
+import json
+import os
 import sys
 import time
+import traceback
+import uuid
 from datetime import datetime
 from typing import Optional, List, Tuple, Dict, Any
 
@@ -144,21 +148,43 @@ class MultiProgress:
 # CLI
 # =============================================================================
 
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("{} is not an integer".format(value))
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("{} must be greater than zero".format(value))
+    return parsed
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Bulma: AD-to-AD migration via backup/restore (keeps original instance).")
     p.add_argument("instance_ids", nargs="+", help="Instance OCID(s). Example: python3 bulma.py -- ocid1.instance...")
     p.add_argument("--dest-ad", default="", help="Optional destination AD name. If omitted, Bulma picks a different AD automatically.")
     p.add_argument("--shape", default="", help="Optional shape for NEW instance. If omitted, keeps original shape.")
     p.add_argument("--ssh-key", default="", help="Optional SSH public key to inject into metadata for NEW instance (Linux).")
+    p.add_argument("--ssh-key-file", default="", help="Optional path to SSH public key file to inject into NEW instance metadata.")
     p.add_argument("--profile", default="DEFAULT", help="OCI config profile name (default: DEFAULT).")
 
     p.add_argument("--restore-lb", action="store_true", help="Detect classic LB membership and re-add new backend(s).")
     p.add_argument("--lb-disable-old", action="store_true", help="After adding new backend(s), set old backend(s) drain+offline.")
     p.add_argument("--lb-compartment-id", default="", help="Compartment OCID where LB(s) live (default: same as instance compartment).")
 
-    p.add_argument("--wait", type=int, default=3600, help="Max wait per resource state change (seconds). Default 3600.")
-    p.add_argument("--poll", type=int, default=10, help="Polling interval seconds. Default 10.")
-    return p.parse_args()
+    p.add_argument("--dry-run", action="store_true", help="Discover and validate the migration plan, then exit without stopping or creating resources.")
+    p.add_argument("--restart-source-on-failure", action="store_true", help="If Bulma stopped the source instance and a later step fails, try to start it again.")
+    p.add_argument("--copy-tags", action="store_true", help="Copy source instance freeform/defined tags to the new instance. Bulma run tags are always added.")
+    p.add_argument("--manifest", default="", help="Path for JSON run manifest. Default: ./bulma-run-<UTC timestamp>.json")
+    p.add_argument("--debug", action="store_true", help="Print a Python traceback if the run fails.")
+
+    p.add_argument("--wait", type=positive_int, default=3600, help="Max wait per resource state change (seconds). Default 3600.")
+    p.add_argument("--poll", type=positive_int, default=10, help="Polling interval seconds. Default 10.")
+    args = p.parse_args()
+    if args.ssh_key and args.ssh_key_file:
+        p.error("Use either --ssh-key or --ssh-key-file, not both.")
+    if args.poll > args.wait:
+        p.error("--poll cannot be greater than --wait.")
+    return args
 
 
 # =============================================================================
@@ -187,8 +213,23 @@ def infer_region_from_instance_ocid(instance_ocid: str) -> str:
 
 def _is_cloud_shell() -> bool:
     """Detect OCI Cloud Shell by the env vars it always sets."""
-    import os
     return bool(os.environ.get("OCI_CS_USER_OCID") or os.environ.get("CLOUDSHELL_ID"))
+
+
+def _align_config_region(config: Dict[str, Any], region_hint: str, label: str) -> Dict[str, Any]:
+    """
+    Bulma derives the target region from the instance OCID. Keep client endpoints
+    aligned with that region even if ~/.oci/config points somewhere else.
+    """
+    existing = config.get("region")
+    if existing and existing != region_hint:
+        print(
+            "{} | [Auth] WARNING: {} region '{}' differs from instance OCID region '{}'. "
+            "Using inferred region.".format(_ts(), label, existing, region_hint),
+            flush=True,
+        )
+    config["region"] = region_hint
+    return config
 
 
 def get_signer_and_config(region_hint: str, profile: str = "DEFAULT"):
@@ -205,7 +246,6 @@ def get_signer_and_config(region_hint: str, profile: str = "DEFAULT"):
     returning, so the caller gets a clear, actionable error message instead of a
     cryptic 401 far into the migration.
     """
-    import os
     auth_errors: Dict[str, str] = {}
 
     # --- 1. OCI Cloud Shell (delegation token) ---
@@ -224,8 +264,7 @@ def get_signer_and_config(region_hint: str, profile: str = "DEFAULT"):
 
             # Load the Cloud Shell config (~/.oci/config is pre-populated in Cloud Shell)
             config = oci.config.from_file(profile_name=profile)
-            if not config.get("region"):
-                config["region"] = region_hint
+            config = _align_config_region(config, region_hint, "Cloud Shell config")
 
             if delegation_token:
                 signer = oci.auth.signers.InstancePrincipalsDelegationTokenSigner(
@@ -245,8 +284,7 @@ def get_signer_and_config(region_hint: str, profile: str = "DEFAULT"):
             # that's what caused the 404. Jump straight to config file.
             try:
                 config = oci.config.from_file(profile_name=profile)
-                if not config.get("region"):
-                    config["region"] = region_hint
+                config = _align_config_region(config, region_hint, "Cloud Shell ~/.oci/config fallback")
                 signer = None
                 _validate_auth(config, signer, "Cloud Shell ~/.oci/config fallback")
                 print("{} | [Auth] Cloud Shell: using ~/.oci/config (profile={}, region={})".format(
@@ -261,11 +299,11 @@ def get_signer_and_config(region_hint: str, profile: str = "DEFAULT"):
         signer = oci.auth.signers.get_resource_principals_signer()
         region = getattr(signer, "region", None) or region_hint
         config = {
-            "region": region,
+            "region": region_hint,
             "tenancy": getattr(signer, "tenancy_id", None),
         }
         _validate_auth(config, signer, "Resource Principals")
-        print("{} | [Auth] Using Resource Principals signer (region={})".format(_ts(), region), flush=True)
+        print("{} | [Auth] Using Resource Principals signer (region={})".format(_ts(), region_hint), flush=True)
         return config, signer
     except Exception as e:
         auth_errors["Resource Principals"] = str(e)
@@ -275,11 +313,11 @@ def get_signer_and_config(region_hint: str, profile: str = "DEFAULT"):
         signer = oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
         region = getattr(signer, "region", None) or region_hint
         config = {
-            "region": region,
+            "region": region_hint,
             "tenancy": getattr(signer, "tenancy_id", None),
         }
         _validate_auth(config, signer, "Instance Principals")
-        print("{} | [Auth] Using Instance Principals signer (region={})".format(_ts(), region), flush=True)
+        print("{} | [Auth] Using Instance Principals signer (region={})".format(_ts(), region_hint), flush=True)
         return config, signer
     except Exception as e:
         auth_errors["Instance Principals"] = str(e)
@@ -293,14 +331,7 @@ def get_signer_and_config(region_hint: str, profile: str = "DEFAULT"):
 
     signer = None
 
-    # Inject region from OCID if missing in config file
-    if not config.get("region"):
-        print(
-            "{} | [Auth] WARNING: 'region' not set in ~/.oci/config (profile={}). "
-            "Injecting region='{}' inferred from instance OCID.".format(_ts(), profile, region_hint),
-            flush=True,
-        )
-        config["region"] = region_hint
+    config = _align_config_region(config, region_hint, "~/.oci/config profile {}".format(profile))
 
     if not config.get("tenancy"):
         raise RuntimeError(
@@ -407,6 +438,43 @@ def get_clients(config: Dict[str, Any], signer=None):
     return identity, compute, network, block, lb, lb_ops
 
 
+def default_manifest_path() -> str:
+    return "bulma-run-{}.json".format(datetime.utcnow().strftime("%Y%m%d%H%M%S"))
+
+
+def write_manifest(path: str, manifest: Dict[str, Any]) -> None:
+    if not path:
+        return
+    directory = os.path.dirname(os.path.abspath(path))
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    manifest["updated_at"] = _ts()
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2, sort_keys=True)
+
+
+def read_ssh_key(args) -> str:
+    if args.ssh_key:
+        return args.ssh_key.strip()
+    if not args.ssh_key_file:
+        return ""
+    with open(args.ssh_key_file, "r", encoding="utf-8") as fh:
+        return fh.read().strip()
+
+
+def bulma_freeform_tags(run_id: str, source_instance_id: str) -> Dict[str, str]:
+    return {
+        "BulmaRunId": run_id,
+        "BulmaSourceInstanceId": source_instance_id,
+    }
+
+
+def merge_freeform_tags(base: Optional[Dict[str, str]], extra: Optional[Dict[str, str]]) -> Dict[str, str]:
+    merged = dict(base or {})
+    merged.update(extra or {})
+    return merged
+
+
 # =============================================================================
 # Wait helper
 # =============================================================================
@@ -478,12 +546,22 @@ def get_instance_block_volume_attachments(compute, compartment_id: str, instance
 
 
 def get_ip_to_subnet_map_for_instance(network, instance_vnics) -> Dict[str, str]:
-    ip_to_subnet: Dict[str, str] = {}
+    private_ip_map = get_private_ip_map_for_instance(network, instance_vnics)
+    return {ip: meta["subnet_id"] for ip, meta in private_ip_map.items()}
+
+
+def get_private_ip_map_for_instance(network, instance_vnics) -> Dict[str, Dict[str, Any]]:
+    private_ip_map: Dict[str, Dict[str, Any]] = {}
     for _, vnic in instance_vnics:
         privs = list_call_get_all_results(network.list_private_ips, vnic_id=vnic.id).data
         for pip in privs:
-            ip_to_subnet[pip.ip_address] = vnic.subnet_id
-    return ip_to_subnet
+            private_ip_map[pip.ip_address] = {
+                "subnet_id": vnic.subnet_id,
+                "vnic_id": vnic.id,
+                "is_primary": bool(getattr(pip, "is_primary", False)),
+                "display_name": getattr(pip, "display_name", None),
+            }
+    return private_ip_map
 
 
 def get_subnet_to_primary_ip_for_instance(network, instance_vnics) -> Dict[str, str]:
@@ -517,13 +595,74 @@ def pick_destination_ad(identity, tenancy_id: str, source_ad: str, requested_des
     raise RuntimeError("Only one AD exists in this region; cannot migrate AD-to-AD.")
 
 
+def validate_destination_networking(network, instance_vnics, dest_ad: str) -> List[Dict[str, Any]]:
+    """
+    Regional subnets can host VNICs in any AD. AD-specific subnets cannot.
+    Fail before stopping the source if any existing VNIC subnet is pinned to a
+    different availability domain.
+    """
+    subnet_cache: Dict[str, Any] = {}
+    issues: List[str] = []
+    summaries: List[Dict[str, Any]] = []
+
+    for _, vnic in instance_vnics:
+        if vnic.subnet_id not in subnet_cache:
+            subnet_cache[vnic.subnet_id] = network.get_subnet(vnic.subnet_id).data
+        subnet = subnet_cache[vnic.subnet_id]
+        subnet_ad = getattr(subnet, "availability_domain", None)
+        summaries.append({
+            "subnet_id": vnic.subnet_id,
+            "subnet_name": getattr(subnet, "display_name", None),
+            "subnet_availability_domain": subnet_ad,
+            "is_regional": subnet_ad is None,
+        })
+        if subnet_ad and subnet_ad != dest_ad:
+            issues.append(
+                "{} ({}) is AD-specific to {}, cannot attach in {}".format(
+                    getattr(subnet, "display_name", vnic.subnet_id),
+                    vnic.subnet_id,
+                    subnet_ad,
+                    dest_ad,
+                )
+            )
+
+    if issues:
+        raise RuntimeError(
+            "Destination networking preflight failed:\n  - {}\n"
+            "Use regional subnets, provide destination subnet mapping in a future enhancement, "
+            "or choose a destination AD compatible with these subnets.".format("\n  - ".join(issues))
+        )
+    return summaries
+
+
+def validate_lb_matches_are_primary_ips(lb_matches: List[Dict[str, Any]]) -> None:
+    secondary = [m for m in lb_matches if not m.get("old_ip_is_primary", True)]
+    if not secondary:
+        return
+    details = [
+        "{} / {} backend {}:{}".format(
+            m.get("lb_name"),
+            m.get("backend_set_name"),
+            m.get("old_ip"),
+            m.get("port"),
+        )
+        for m in secondary
+    ]
+    raise RuntimeError(
+        "--restore-lb found backend(s) on secondary private IPs, which Bulma cannot safely remap yet:\n"
+        "  - {}\n"
+        "Rerun without --restore-lb and recreate those backend entries manually after migration, "
+        "or extend Bulma to recreate secondary private IPs first.".format("\n  - ".join(details))
+    )
+
+
 # =============================================================================
 # Classic Load Balancer discovery & restore
 # =============================================================================
 
-def discover_classic_lb_membership(lb_client, lb_compartment_id: str, instance_ip_to_subnet: Dict[str, str],
+def discover_classic_lb_membership(lb_client, lb_compartment_id: str, instance_private_ips: Dict[str, Dict[str, Any]],
                                    progress: Optional["StepProgress"] = None) -> List[Dict[str, Any]]:
-    instance_ips = set(instance_ip_to_subnet.keys())
+    instance_ips = set(instance_private_ips.keys())
     matches: List[Dict[str, Any]] = []
 
     lbs = list_call_get_all_results(lb_client.list_load_balancers, compartment_id=lb_compartment_id).data
@@ -535,8 +674,12 @@ def discover_classic_lb_membership(lb_client, lb_compartment_id: str, instance_i
                             detail="Scanning LB {}/{}: {}".format(i, len(lbs), getattr(lb, "display_name", lb.id)))
         try:
             backend_sets = list_call_get_all_results(lb_client.list_backend_sets, load_balancer_id=lb.id).data
-        except Exception:
-            continue
+        except Exception as e:
+            raise RuntimeError(
+                "Failed to list backend sets for load balancer {} ({}): {}".format(
+                    getattr(lb, "display_name", lb.id), lb.id, e
+                )
+            )
 
         for bs in backend_sets:
             bs_name = getattr(bs, "name", None)
@@ -548,13 +691,18 @@ def discover_classic_lb_membership(lb_client, lb_compartment_id: str, instance_i
                     load_balancer_id=lb.id,
                     backend_set_name=bs_name
                 ).data
-            except Exception:
-                continue
+            except Exception as e:
+                raise RuntimeError(
+                    "Failed to list backends for load balancer {} backend set {}: {}".format(
+                        getattr(lb, "display_name", lb.id), bs_name, e
+                    )
+                )
 
             for be in backends:
                 ip = getattr(be, "ip_address", None)
                 port = getattr(be, "port", None)
                 if ip in instance_ips and port is not None:
+                    ip_meta = instance_private_ips.get(ip, {})
                     matches.append({
                         "lb_id": lb.id,
                         "lb_name": getattr(lb, "display_name", lb.id),
@@ -564,7 +712,8 @@ def discover_classic_lb_membership(lb_client, lb_compartment_id: str, instance_i
                         "weight": getattr(be, "weight", None),
                         "backup": bool(getattr(be, "backup", False)),
                         "max_connections": getattr(be, "max_connections", None),
-                        "subnet_id": instance_ip_to_subnet.get(ip)
+                        "subnet_id": ip_meta.get("subnet_id"),
+                        "old_ip_is_primary": bool(ip_meta.get("is_primary", False)),
                     })
 
     if progress:
@@ -655,11 +804,11 @@ def ensure_backend_in_classic_lb(lb_ops, match: Dict[str, Any], new_ip: str, dis
 # Migration steps
 # =============================================================================
 
-def stop_instance_if_needed(compute, instance, max_wait: int, poll: int, progress: Optional["StepProgress"] = None) -> None:
+def stop_instance_if_needed(compute, instance, max_wait: int, poll: int, progress: Optional["StepProgress"] = None) -> bool:
     if instance.lifecycle_state == "STOPPED":
         if progress:
             progress.update(1.0, detail="Instance already STOPPED")
-        return
+        return False
     if progress:
         progress.update(0.05, detail="Sending STOP action")
     compute.instance_action(instance.id, "STOP")
@@ -667,9 +816,24 @@ def stop_instance_if_needed(compute, instance, max_wait: int, poll: int, progres
     wait_for_state(lambda: compute.get_instance(instance_id).data, "STOPPED", max_wait, poll, "instance", progress)
     if progress:
         progress.update(1.0, detail="Instance STOPPED")
+    return True
+
+
+def start_instance_if_needed(compute, instance_id: str, max_wait: int, poll: int,
+                             progress: Optional["StepProgress"] = None) -> None:
+    inst = compute.get_instance(instance_id).data
+    if inst.lifecycle_state == "RUNNING":
+        if progress:
+            progress.update(1.0, detail="Source instance already RUNNING")
+        return
+    if progress:
+        progress.update(0.05, detail="Attempting source instance START after failure")
+    compute.instance_action(instance_id, "START")
+    wait_for_state(lambda: compute.get_instance(instance_id).data, "RUNNING", max_wait, poll, "source restart", progress)
 
 
 def backup_boot_volume(block, boot_volume_id: str, name_prefix: str, max_wait: int, poll: int,
+                       freeform_tags: Optional[Dict[str, str]] = None,
                        progress: Optional["StepProgress"] = None) -> str:
     display_name = "{}-boot-bkp-{}".format(name_prefix, datetime.utcnow().strftime("%Y%m%d%H%M%S"))
     if progress:
@@ -677,7 +841,8 @@ def backup_boot_volume(block, boot_volume_id: str, name_prefix: str, max_wait: i
     details = oci.core.models.CreateBootVolumeBackupDetails(
         boot_volume_id=boot_volume_id,
         display_name=display_name,
-        type="FULL"
+        type="FULL",
+        freeform_tags=freeform_tags
     )
     bkp = block.create_boot_volume_backup(details).data
     bkp_id = bkp.id  # capture now to avoid late-binding closure bug
@@ -688,6 +853,7 @@ def backup_boot_volume(block, boot_volume_id: str, name_prefix: str, max_wait: i
 
 
 def backup_block_volumes(block, volume_attachments, name_prefix: str, max_wait: int, poll: int,
+                         freeform_tags: Optional[Dict[str, str]] = None,
                          progress: Optional["StepProgress"] = None) -> Dict[str, str]:
     backup_map: Dict[str, str] = {}
     total = len(volume_attachments)
@@ -704,7 +870,8 @@ def backup_block_volumes(block, volume_attachments, name_prefix: str, max_wait: 
         details = oci.core.models.CreateVolumeBackupDetails(
             volume_id=vol_id,
             display_name=display_name,
-            type="FULL"
+            type="FULL",
+            freeform_tags=freeform_tags
         )
         bkp = block.create_volume_backup(details).data
         bkp_id = bkp.id  # capture now to avoid late-binding closure bug
@@ -720,7 +887,8 @@ def backup_block_volumes(block, volume_attachments, name_prefix: str, max_wait: 
 
 
 def restore_boot_volume(block, compartment_id: str, dest_ad: str, boot_backup_id: str, name_prefix: str,
-                        max_wait: int, poll: int, progress: Optional["StepProgress"] = None) -> str:
+                        max_wait: int, poll: int, freeform_tags: Optional[Dict[str, str]] = None,
+                        progress: Optional["StepProgress"] = None) -> str:
     display_name = "{}-boot-restored".format(name_prefix)
     if progress:
         progress.update(0.05, detail="Restoring boot volume into {}: {}".format(dest_ad, display_name))
@@ -730,7 +898,8 @@ def restore_boot_volume(block, compartment_id: str, dest_ad: str, boot_backup_id
         availability_domain=dest_ad,
         compartment_id=compartment_id,
         display_name=display_name,
-        source_details=source
+        source_details=source,
+        freeform_tags=freeform_tags
     )
     bv = block.create_boot_volume(details).data
     bv_id = bv.id  # capture now to avoid late-binding closure bug
@@ -741,7 +910,8 @@ def restore_boot_volume(block, compartment_id: str, dest_ad: str, boot_backup_id
 
 
 def restore_block_volumes(block, compartment_id: str, dest_ad: str, volume_backup_map: Dict[str, str], name_prefix: str,
-                          max_wait: int, poll: int, progress: Optional["StepProgress"] = None) -> Dict[str, str]:
+                          max_wait: int, poll: int, freeform_tags: Optional[Dict[str, str]] = None,
+                          progress: Optional["StepProgress"] = None) -> Dict[str, str]:
     restored: Dict[str, str] = {}
     total = len(volume_backup_map)
     if total == 0:
@@ -761,7 +931,8 @@ def restore_block_volumes(block, compartment_id: str, dest_ad: str, volume_backu
             availability_domain=dest_ad,
             compartment_id=compartment_id,
             display_name=display_name,
-            source_details=source
+            source_details=source,
+            freeform_tags=freeform_tags
         )
         vol = block.create_volume(details).data
         vol_id = vol.id  # capture now to avoid late-binding closure bug
@@ -777,7 +948,7 @@ def restore_block_volumes(block, compartment_id: str, dest_ad: str, volume_backu
 
 
 def create_new_instance(compute, instance, compartment_id: str, dest_ad: str, boot_volume_id: str, primary_vnic,
-                        new_shape: str, ssh_key: str, max_wait: int, poll: int,
+                        new_shape: str, ssh_key: str, run_id: str, copy_tags: bool, max_wait: int, poll: int,
                         progress: Optional["StepProgress"] = None) -> Tuple[str, str]:
     suffix = datetime.utcnow().strftime("%Y%m%d%H%M%S")
     new_name = "{}-Bulma-{}".format(instance.display_name, suffix)
@@ -787,7 +958,7 @@ def create_new_instance(compute, instance, compartment_id: str, dest_ad: str, bo
     # Flex shapes require explicit ocpus + memory_in_gbs — omitting this causes a 400.
     shape_config = None
     orig_sc = getattr(instance, "shape_config", None)
-    if orig_sc is not None:
+    if orig_sc is not None and shape == instance.shape:
         ocpus = getattr(orig_sc, "ocpus", None)
         memory_in_gbs = getattr(orig_sc, "memory_in_gbs", None)
         if ocpus is not None and memory_in_gbs is not None:
@@ -813,6 +984,13 @@ def create_new_instance(compute, instance, compartment_id: str, dest_ad: str, bo
     if ssh_key:
         metadata["ssh_authorized_keys"] = ssh_key
 
+    run_tags = bulma_freeform_tags(run_id, instance.id)
+    freeform_tags = merge_freeform_tags(
+        getattr(instance, "freeform_tags", {}) if copy_tags else {},
+        run_tags
+    )
+    defined_tags = getattr(instance, "defined_tags", None) if copy_tags else None
+
     create_vnic_details = oci.core.models.CreateVnicDetails(
         subnet_id=primary_vnic.subnet_id,
         display_name=primary_vnic.display_name or "{}-vnic0".format(new_name),
@@ -828,7 +1006,9 @@ def create_new_instance(compute, instance, compartment_id: str, dest_ad: str, bo
         shape_config=shape_config,
         source_details=source_details,
         create_vnic_details=create_vnic_details,
-        metadata=metadata
+        metadata=metadata,
+        freeform_tags=freeform_tags,
+        defined_tags=defined_tags
     )
 
     new_inst = compute.launch_instance(details).data
@@ -931,6 +1111,19 @@ def attach_restored_volumes(compute, new_instance_id: str, original_attachments,
 
 def main():
     args = parse_args()
+    ssh_key = read_ssh_key(args)
+    run_id = "{}-{}".format(datetime.utcnow().strftime("%Y%m%d%H%M%S"), uuid.uuid4().hex[:8])
+    manifest_path = args.manifest.strip() or default_manifest_path()
+    manifest: Dict[str, Any] = {
+        "run_id": run_id,
+        "started_at": _ts(),
+        "dry_run": bool(args.dry_run),
+        "restore_lb": bool(args.restore_lb),
+        "restart_source_on_failure": bool(args.restart_source_on_failure),
+        "instances": [],
+    }
+    write_manifest(manifest_path, manifest)
+    print("{} | [Manifest] {}".format(_ts(), os.path.abspath(manifest_path)), flush=True)
 
     # Validate + infer region
     for ocid in args.instance_ids:
@@ -950,6 +1143,14 @@ def main():
     multi = MultiProgress(len(args.instance_ids))
 
     for n, instance_id in enumerate(args.instance_ids, start=1):
+        instance_entry: Dict[str, Any] = {
+            "source_instance_id": instance_id,
+            "status": "started",
+            "created_resources": {},
+        }
+        manifest["instances"].append(instance_entry)
+        write_manifest(manifest_path, manifest)
+
         steps = [
             ("Discover configuration", 10),
             ("Scan Load Balancers", 8 if args.restore_lb else 0),
@@ -970,105 +1171,193 @@ def main():
             overall_prefix=multi.overall_prefix(n)
         )
 
-        prog.start_step("Discover configuration")
-        inst = compute.get_instance(instance_id).data
-        prog.label = "Bulma | {}".format(inst.display_name)
+        source_stopped_by_bulma = False
+        try:
+            prog.start_step("Discover configuration")
+            inst = compute.get_instance(instance_id).data
+            prog.label = "Bulma | {}".format(inst.display_name)
 
-        compartment_id = inst.compartment_id
-        source_ad = inst.availability_domain
-        dest_ad = pick_destination_ad(identity, tenancy_id, source_ad, args.dest_ad)
+            compartment_id = inst.compartment_id
+            source_ad = inst.availability_domain
+            dest_ad = pick_destination_ad(identity, tenancy_id, source_ad, args.dest_ad)
 
-        instance_vnics = get_instance_vnics(compute, network, compartment_id, instance_id)
-        _, primary_vnic = instance_vnics[0]
+            instance_vnics = get_instance_vnics(compute, network, compartment_id, instance_id)
+            if not instance_vnics:
+                raise RuntimeError("No VNIC attachments found for instance {}.".format(instance_id))
+            _, primary_vnic = instance_vnics[0]
 
-        boot_volume_id = get_instance_boot_volume_id(compute, compartment_id, instance_id, source_ad)
-        block_attachments = get_instance_block_volume_attachments(compute, compartment_id, instance_id)
+            network_summary = validate_destination_networking(network, instance_vnics, dest_ad)
+            private_ip_map = get_private_ip_map_for_instance(network, instance_vnics)
+            secondary_private_ips = sorted(
+                ip for ip, meta in private_ip_map.items() if not meta.get("is_primary", False)
+            )
 
-        prog.update(0.7, detail="region={} | sourceAD={} -> destAD={} | vnics={} | blockVols={}".format(
-            config.get("region"), source_ad, dest_ad, len(instance_vnics), len(block_attachments)
-        ))
-        prog.complete_step("Configuration collected")
+            boot_volume_id = get_instance_boot_volume_id(compute, compartment_id, instance_id, source_ad)
+            block_attachments = get_instance_block_volume_attachments(compute, compartment_id, instance_id)
 
-        # LB scan
-        lb_matches: List[Dict[str, Any]] = []
-        lb_compartment_id = args.lb_compartment_id.strip() or compartment_id
-        if args.restore_lb:
-            prog.start_step("Scan Load Balancers")
-            ip_to_subnet = get_ip_to_subnet_map_for_instance(network, instance_vnics)
-            prog.update(0.05, detail="scanning classic LBs in compartment {}".format(lb_compartment_id))
-            lb_matches = discover_classic_lb_membership(lb, lb_compartment_id, ip_to_subnet, progress=prog)
-            prog.complete_step("LB matches={}".format(len(lb_matches)))
+            instance_entry.update({
+                "display_name": inst.display_name,
+                "compartment_id": compartment_id,
+                "region": config.get("region"),
+                "source_ad": source_ad,
+                "destination_ad": dest_ad,
+                "boot_volume_id": boot_volume_id,
+                "block_volume_count": len(block_attachments),
+                "vnic_count": len(instance_vnics),
+                "secondary_private_ips": secondary_private_ips,
+                "network_preflight": network_summary,
+            })
+            write_manifest(manifest_path, manifest)
 
-        # Stop
-        prog.start_step("Stop source instance")
-        stop_instance_if_needed(compute, inst, args.wait, args.poll, progress=prog)
-        prog.complete_step("Source instance STOPPED")
+            prog.update(0.7, detail="region={} | sourceAD={} -> destAD={} | vnics={} | blockVols={} | secondaryIPs={}".format(
+                config.get("region"), source_ad, dest_ad, len(instance_vnics), len(block_attachments), len(secondary_private_ips)
+            ))
+            prog.complete_step("Configuration collected")
 
-        name_prefix = inst.display_name.replace(" ", "_")[:40]
+            # LB scan
+            lb_matches: List[Dict[str, Any]] = []
+            lb_compartment_id = args.lb_compartment_id.strip() or compartment_id
+            if args.restore_lb:
+                prog.start_step("Scan Load Balancers")
+                prog.update(0.05, detail="scanning classic LBs in compartment {}".format(lb_compartment_id))
+                lb_matches = discover_classic_lb_membership(lb, lb_compartment_id, private_ip_map, progress=prog)
+                validate_lb_matches_are_primary_ips(lb_matches)
+                instance_entry["lb_matches"] = lb_matches
+                write_manifest(manifest_path, manifest)
+                prog.complete_step("LB matches={}".format(len(lb_matches)))
 
-        # Backup boot
-        prog.start_step("Backup boot volume")
-        boot_bkp_id = backup_boot_volume(block, boot_volume_id, name_prefix, args.wait, args.poll, progress=prog)
-        prog.complete_step("Boot backup complete")
+            if args.dry_run:
+                instance_entry["status"] = "dry_run_complete"
+                write_manifest(manifest_path, manifest)
+                print("{} | [DryRun] {}: preflight passed; no changes made.".format(_ts(), inst.display_name), flush=True)
+                continue
 
-        # Backup block
-        prog.start_step("Backup block volumes")
-        blk_bkp_map = backup_block_volumes(block, block_attachments, name_prefix, args.wait, args.poll, progress=prog)
-        prog.complete_step("Block backups complete (count={})".format(len(blk_bkp_map)))
+            run_tags = bulma_freeform_tags(run_id, instance_id)
 
-        # Restore boot
-        prog.start_step("Restore boot volume")
-        new_boot_vol_id = restore_boot_volume(
-            block, compartment_id, dest_ad, boot_bkp_id, name_prefix, args.wait, args.poll, progress=prog
-        )
-        prog.complete_step("Boot restore complete")
+            # Stop
+            prog.start_step("Stop source instance")
+            source_stopped_by_bulma = stop_instance_if_needed(compute, inst, args.wait, args.poll, progress=prog)
+            instance_entry["source_stopped_by_bulma"] = source_stopped_by_bulma
+            write_manifest(manifest_path, manifest)
+            prog.complete_step("Source instance STOPPED")
 
-        # Restore block
-        prog.start_step("Restore block volumes")
-        restored_blk_map = restore_block_volumes(
-            block, compartment_id, dest_ad, blk_bkp_map, name_prefix, args.wait, args.poll, progress=prog
-        )
-        prog.complete_step("Block restore complete (count={})".format(len(restored_blk_map)))
+            name_prefix = inst.display_name.replace(" ", "_")[:40]
 
-        # Launch new instance
-        prog.start_step("Launch new instance")
-        new_instance_id, new_instance_name = create_new_instance(
-            compute, inst, compartment_id, dest_ad, new_boot_vol_id, primary_vnic,
-            args.shape, args.ssh_key, args.wait, args.poll, progress=prog
-        )
-        prog.complete_step("New instance running")
+            # Backup boot
+            prog.start_step("Backup boot volume")
+            boot_bkp_id = backup_boot_volume(
+                block, boot_volume_id, name_prefix, args.wait, args.poll, freeform_tags=run_tags, progress=prog
+            )
+            instance_entry["created_resources"]["boot_volume_backup_id"] = boot_bkp_id
+            write_manifest(manifest_path, manifest)
+            prog.complete_step("Boot backup complete")
 
-        # Secondary VNICs
-        prog.start_step("Attach secondary VNICs")
-        attach_secondary_vnics(compute, instance_vnics, new_instance_id, args.wait, args.poll, progress=prog)
-        prog.complete_step("Secondary VNICs attached")
+            # Backup block
+            prog.start_step("Backup block volumes")
+            blk_bkp_map = backup_block_volumes(
+                block, block_attachments, name_prefix, args.wait, args.poll, freeform_tags=run_tags, progress=prog
+            )
+            instance_entry["created_resources"]["block_volume_backup_ids_by_source_volume_id"] = blk_bkp_map
+            write_manifest(manifest_path, manifest)
+            prog.complete_step("Block backups complete (count={})".format(len(blk_bkp_map)))
 
-        # Attach volumes
-        prog.start_step("Attach block volumes")
-        attach_restored_volumes(compute, new_instance_id, block_attachments, restored_blk_map, args.wait, args.poll, progress=prog)
-        prog.complete_step("Volumes attached")
+            # Restore boot
+            prog.start_step("Restore boot volume")
+            new_boot_vol_id = restore_boot_volume(
+                block, compartment_id, dest_ad, boot_bkp_id, name_prefix, args.wait, args.poll,
+                freeform_tags=run_tags, progress=prog
+            )
+            instance_entry["created_resources"]["restored_boot_volume_id"] = new_boot_vol_id
+            write_manifest(manifest_path, manifest)
+            prog.complete_step("Boot restore complete")
 
-        # LB restore
-        if args.restore_lb:
-            prog.start_step("Restore LB backends")
-            if lb_matches:
-                new_instance_vnics = get_instance_vnics(compute, network, compartment_id, new_instance_id)
-                new_subnet_to_ip = get_subnet_to_primary_ip_for_instance(network, new_instance_vnics)
-                new_primary_private_ip = new_subnet_to_ip.get(primary_vnic.subnet_id)
+            # Restore block
+            prog.start_step("Restore block volumes")
+            restored_blk_map = restore_block_volumes(
+                block, compartment_id, dest_ad, blk_bkp_map, name_prefix, args.wait, args.poll,
+                freeform_tags=run_tags, progress=prog
+            )
+            instance_entry["created_resources"]["restored_block_volume_ids_by_source_volume_id"] = restored_blk_map
+            write_manifest(manifest_path, manifest)
+            prog.complete_step("Block restore complete (count={})".format(len(restored_blk_map)))
 
-                total = len(lb_matches)
-                for i, m in enumerate(lb_matches):
-                    desired_ip = new_subnet_to_ip.get(m.get("subnet_id")) or new_primary_private_ip
-                    if not desired_ip:
-                        prog.update((i + 1) / float(total), detail="Could not determine new IP; skipping backend restore")
-                        continue
-                    ensure_backend_in_classic_lb(
-                        lb_ops, m, desired_ip, args.lb_disable_old, progress=prog, idx=i, total=total
-                    )
-                prog.complete_step("LB restored")
-            else:
-                prog.update(1.0, detail="No LB membership detected; nothing to restore")
-                prog.complete_step("Skipped")
+            # Launch new instance
+            prog.start_step("Launch new instance")
+            new_instance_id, new_instance_name = create_new_instance(
+                compute, inst, compartment_id, dest_ad, new_boot_vol_id, primary_vnic,
+                args.shape, ssh_key, run_id, args.copy_tags, args.wait, args.poll, progress=prog
+            )
+            instance_entry["created_resources"]["new_instance_id"] = new_instance_id
+            instance_entry["created_resources"]["new_instance_name"] = new_instance_name
+            write_manifest(manifest_path, manifest)
+            prog.complete_step("New instance running")
+
+            # Secondary VNICs
+            prog.start_step("Attach secondary VNICs")
+            secondary_vnic_attachment_ids = attach_secondary_vnics(
+                compute, instance_vnics, new_instance_id, args.wait, args.poll, progress=prog
+            )
+            instance_entry["created_resources"]["secondary_vnic_attachment_ids"] = secondary_vnic_attachment_ids
+            write_manifest(manifest_path, manifest)
+            prog.complete_step("Secondary VNICs attached")
+
+            # Attach volumes
+            prog.start_step("Attach block volumes")
+            volume_attachment_ids = attach_restored_volumes(
+                compute, new_instance_id, block_attachments, restored_blk_map, args.wait, args.poll, progress=prog
+            )
+            instance_entry["created_resources"]["volume_attachment_ids"] = volume_attachment_ids
+            write_manifest(manifest_path, manifest)
+            prog.complete_step("Volumes attached")
+
+            # LB restore
+            if args.restore_lb:
+                prog.start_step("Restore LB backends")
+                if lb_matches:
+                    new_instance_vnics = get_instance_vnics(compute, network, compartment_id, new_instance_id)
+                    new_subnet_to_ip = get_subnet_to_primary_ip_for_instance(network, new_instance_vnics)
+                    new_primary_private_ip = new_subnet_to_ip.get(primary_vnic.subnet_id)
+
+                    total = len(lb_matches)
+                    for i, m in enumerate(lb_matches):
+                        desired_ip = new_subnet_to_ip.get(m.get("subnet_id")) or new_primary_private_ip
+                        if not desired_ip:
+                            raise RuntimeError(
+                                "Could not determine new private IP for LB backend {}:{}.".format(
+                                    m.get("old_ip"), m.get("port")
+                                )
+                            )
+                        ensure_backend_in_classic_lb(
+                            lb_ops, m, desired_ip, args.lb_disable_old, progress=prog, idx=i, total=total
+                        )
+                    instance_entry["lb_restored"] = True
+                    write_manifest(manifest_path, manifest)
+                    prog.complete_step("LB restored")
+                else:
+                    instance_entry["lb_restored"] = False
+                    write_manifest(manifest_path, manifest)
+                    prog.update(1.0, detail="No LB membership detected; nothing to restore")
+                    prog.complete_step("Skipped")
+
+            instance_entry["status"] = "complete"
+            write_manifest(manifest_path, manifest)
+
+        except Exception as exc:
+            instance_entry["status"] = "failed"
+            instance_entry["error"] = str(exc)
+            write_manifest(manifest_path, manifest)
+            if args.restart_source_on_failure and source_stopped_by_bulma:
+                try:
+                    start_instance_if_needed(compute, instance_id, args.wait, args.poll, progress=prog)
+                    instance_entry["source_restart_after_failure"] = "succeeded"
+                except Exception as restart_exc:
+                    instance_entry["source_restart_after_failure"] = "failed: {}".format(restart_exc)
+                write_manifest(manifest_path, manifest)
+            raise
+
+    manifest["status"] = "dry_run_complete" if args.dry_run else "complete"
+    write_manifest(manifest_path, manifest)
+    print("{} | [Manifest] Final manifest written: {}".format(_ts(), os.path.abspath(manifest_path)), flush=True)
 
 
 if __name__ == "__main__":
@@ -1079,5 +1368,7 @@ if __name__ == "__main__":
         print("\n{} | Canceled by user.".format(_ts()))
         sys.exit(130)
     except Exception as e:
+        if "--debug" in sys.argv:
+            traceback.print_exc()
         print("\n{} | ERROR: {}".format(_ts(), e))
         sys.exit(1)
