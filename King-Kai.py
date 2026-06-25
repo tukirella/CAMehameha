@@ -25,7 +25,7 @@ Updates in this version:
 
 Important:
   - "Creator" is best-effort from tags (createdBy/creator/owner...). If missing, shows "Unknown".
-  - Costs are baseline monthly USD estimates based on your Jan-2026 OCI Calculator table.
+  - Costs are rough baseline monthly USD estimates based on your June-2026 OCI Calculator table.
   - Availability checks are best-effort: shape catalog + quota signals (when accessible).
 """
 
@@ -74,7 +74,6 @@ A3_TARGET   = "VM.Standard.A3.Flex"   # ARM availability-only check column
 RISK_ORDER = {"Critical": 0, "High": 1, "Medium": 2}
 AVAIL_AVAILABLE = "available"
 AVAIL_UNAVAILABLE = "unavailable"
-AVAIL_UNKNOWN = "unknown"
 TERMINATED_STATES = {"TERMINATED", "TERMINATING"}
 
 
@@ -159,9 +158,7 @@ def fmt_delta(v: Optional[float]) -> str:
 def availability_to_csv(status: Optional[str]) -> str:
     if status == AVAIL_AVAILABLE:
         return "Y"
-    if status == AVAIL_UNAVAILABLE:
-        return "N"
-    return "Unknown"
+    return "N"
 
 
 def delta_class(value: Optional[float]) -> str:
@@ -554,6 +551,21 @@ def is_arm_old(shape: str) -> bool:
     return shape == "VM.Standard.A1.Flex"
 
 
+def shape_family(shape: str) -> Optional[str]:
+    """Return the architecture family used by the report summary cards."""
+    if re.match(r"^(VM|BM)\.Standard\.E\d+(\.|$)", shape):
+        return "AMD"
+    if (
+        re.match(r"^(VM|BM)\.Standard2\.", shape)
+        or re.match(r"^(VM|BM)\.Standard3\.", shape)
+        or re.match(r"^(VM|BM)\.Optimized3\.", shape)
+    ):
+        return "Intel"
+    if re.match(r"^(VM|BM)\.Standard\.A\d+(\.|$)", shape):
+        return "ARM"
+    return None
+
+
 def risk_for_shape(shape: str) -> str:
     """
     CRITICAL:
@@ -780,19 +792,18 @@ def evaluate_upgrade_option(
     ra_cache: Dict[Tuple[str, str, Optional[str]], Optional[Dict[str, Any]]],
 ) -> str:
     if not instance_ad:
-        return AVAIL_UNKNOWN
+        return AVAIL_UNAVAILABLE
 
     ad_shapes = shapes_cache_by_ad.get(instance_ad)
     if ad_shapes is None:
-        return AVAIL_UNKNOWN
+        return AVAIL_UNAVAILABLE
     if target_shape not in ad_shapes:
         return AVAIL_UNAVAILABLE
 
     limit_names = target_to_limits.get(target_shape, [])
     if not limit_names:
-        return AVAIL_UNKNOWN
+        return AVAIL_AVAILABLE
 
-    saw_unknown = False
     for ln in limit_names:
         key = (instance_compartment_id, ln, instance_ad)
         if key not in ra_cache:
@@ -805,7 +816,6 @@ def evaluate_upgrade_option(
             )
         ra = ra_cache[key]
         if not ra:
-            saw_unknown = True
             continue
 
         eff = ra.get("effective_quota_value", None)
@@ -825,11 +835,9 @@ def evaluate_upgrade_option(
                 if float(avail) < float(required):
                     return AVAIL_UNAVAILABLE
             except (TypeError, ValueError):
-                saw_unknown = True
-        elif required is not None:
-            saw_unknown = True
+                continue
 
-    return AVAIL_UNKNOWN if saw_unknown else AVAIL_AVAILABLE
+    return AVAIL_AVAILABLE
 
 
 # ------------------------------------------------------------
@@ -840,6 +848,7 @@ def scan_compartment_shapes_only(
     compute_client,
     active_region: str,
     out_rows: List[Dict[str, Any]],
+    family_totals: Dict[str, int],
     include_terminated: bool = False,
 ) -> int:
     """Returns how many legacy-shape instances matched in this compartment for the active region."""
@@ -852,9 +861,6 @@ def scan_compartment_shapes_only(
 
     for inst in instances:
         shape = getattr(inst, "shape", "") or ""
-        if shape not in OLD_SHAPES_SET:
-            continue
-
         ad = getattr(inst, "availability_domain", None)
         lifecycle = getattr(inst, "lifecycle_state", None)
         name = getattr(inst, "display_name", inst.id)
@@ -862,6 +868,18 @@ def scan_compartment_shapes_only(
         shape_config = getattr(inst, "shape_config", None)
         ff_tags = getattr(inst, "freeform_tags", None)
         df_tags = getattr(inst, "defined_tags", None)
+
+        if not include_terminated and str(lifecycle or "").upper() in TERMINATED_STATES:
+            continue
+
+        family = shape_family(shape)
+        counted_family = False
+        if family:
+            family_totals[family] = family_totals.get(family, 0) + 1
+            counted_family = True
+
+        if shape not in OLD_SHAPES_SET:
+            continue
 
         try:
             full = compute_client.get_instance(inst.id).data
@@ -875,6 +893,8 @@ def scan_compartment_shapes_only(
             pass
 
         if not include_terminated and str(lifecycle or "").upper() in TERMINATED_STATES:
+            if counted_family and family:
+                family_totals[family] = max(0, family_totals.get(family, 0) - 1)
             continue
 
         ocpus, mem_gb = infer_ocpu_mem(shape, shape_config)
@@ -926,7 +946,6 @@ RISK_BADGE = {
 AVAIL_ICON = {
     AVAIL_AVAILABLE: "<span class='avail-ok' title='Available'>&check;</span>",
     AVAIL_UNAVAILABLE: "<span class='avail-no' title='Unavailable'>&times;</span>",
-    AVAIL_UNKNOWN: "<span class='avail-unknown' title='Unknown'>?</span>",
 }
 
 
@@ -935,7 +954,7 @@ def risk_badge(risk: str) -> str:
 
 
 def avail_cell(status: Optional[str]) -> str:
-    return AVAIL_ICON.get(status or AVAIL_UNKNOWN, AVAIL_ICON[AVAIL_UNKNOWN])
+    return AVAIL_ICON.get(status or AVAIL_UNAVAILABLE, AVAIL_ICON[AVAIL_UNAVAILABLE])
 
 
 def _html_table(title: str, accent_var: str, rows: List[Dict[str, Any]],
@@ -1168,6 +1187,7 @@ def main():
     print("-" * 70)
 
     all_rows: List[Dict[str, Any]] = []
+    family_totals = {"AMD": 0, "Intel": 0, "ARM": 0}
     total_compartments = len(compartments)
 
     for region_idx, region_name in enumerate(selected_regions, start=1):
@@ -1193,6 +1213,7 @@ def main():
                     region_compute_client,
                     region_name,
                     all_rows,
+                    family_totals,
                     include_terminated=args.include_terminated,
                 )
                 print(f"done (found {found})", flush=True)
@@ -1294,12 +1315,19 @@ def main():
         elif cat == "ARM":
             arm_counts["A1"] += 1
 
+    amd_legacy_total = amd_counts["E2"] + amd_counts["E3"] + amd_counts["E4"]
+    intel_legacy_total = intel_counts["Standard2"]
+    arm_legacy_total = arm_counts["A1"]
+    amd_family_total = max(family_totals.get("AMD", 0), amd_legacy_total)
+    intel_family_total = max(family_totals.get("Intel", 0), intel_legacy_total)
+    arm_family_total = max(family_totals.get("ARM", 0), arm_legacy_total)
+
     # HTML ordering
     amd_rows   = sort_rows_for_html([r for r in all_rows if r.get("category") == "AMD"])
     intel_rows = sort_rows_for_html([r for r in all_rows if r.get("category") == "Intel"])
     arm_rows   = sort_rows_for_html([r for r in all_rows if r.get("category") == "ARM"])
 
-    # --------------- Generate CSV (Y/N/Unknown availability, full creator) ----------------
+    # --------------- Generate CSV (Y/N availability, full creator) ----------------
     with open(csv_path, mode="w", newline="", encoding="utf-8") as csvfile:
         fieldnames = [
             "Category", "Risk", "oCPU", "MemoryGB", "Shape", "InstanceName", "Creator", "Lifecycle",
@@ -1544,6 +1572,14 @@ def main():
       font-size: 22px; font-weight: 700;
       color: var(--text-head);
     }}
+    .card-separator {{
+      color: var(--text-dim);
+      font-size: 18px;
+      margin: 0 4px;
+    }}
+    .card-total {{
+      color: var(--accent2);
+    }}
     .card-sub {{
       font-family: var(--font-mono);
       font-size: 11px; color: var(--text-dim); margin-top: 4px;
@@ -1624,7 +1660,6 @@ def main():
     .avail-cell {{ text-align: center; }}
     .avail-ok {{ color: var(--ok); font-size: 15px; font-weight: 700; }}
     .avail-no {{ color: var(--no); font-size: 15px; font-weight: 700; }}
-    .avail-unknown {{ color: var(--text-dim); font-size: 14px; font-weight: 700; }}
 
     /* ── Delta ── */
     .delta-pos {{ color: #ff8080; }}
@@ -1660,6 +1695,8 @@ def main():
       line-height: 1.7;
     }}
     .pricing-note strong {{ color: var(--accent2); }}
+    .pricing-note a {{ color: var(--accent2); text-decoration: none; border-bottom: 1px solid rgba(0,229,255,.35); }}
+    .pricing-note a:hover {{ color: var(--text-head); border-bottom-color: var(--text-head); }}
 
     .empty-note {{
       padding: 24px;
@@ -1707,26 +1744,27 @@ def main():
 
   <div class="cards-wrap">
     <div class="card">
-      <div class="card-label">AMD Legacy</div>
-      <div class="card-value">{amd_counts["E2"] + amd_counts["E3"] + amd_counts["E4"]}</div>
+      <div class="card-label">AMD Legacy / Total</div>
+      <div class="card-value">{amd_legacy_total}<span class="card-separator">/</span><span class="card-total">{amd_family_total}</span></div>
       <div class="card-sub">E2: <span>{amd_counts["E2"]}</span> · E3: <span>{amd_counts["E3"]}</span> · E4: <span>{amd_counts["E4"]}</span></div>
     </div>
     <div class="card">
-      <div class="card-label">Intel Legacy</div>
-      <div class="card-value">{intel_counts["Standard2"]}</div>
+      <div class="card-label">Intel Legacy / Total</div>
+      <div class="card-value">{intel_legacy_total}<span class="card-separator">/</span><span class="card-total">{intel_family_total}</span></div>
       <div class="card-sub">Standard2: <span>{intel_counts["Standard2"]}</span></div>
     </div>
     <div class="card">
-      <div class="card-label">ARM Legacy</div>
-      <div class="card-value">{arm_counts["A1"]}</div>
+      <div class="card-label">ARM Legacy / Total</div>
+      <div class="card-value">{arm_legacy_total}<span class="card-separator">/</span><span class="card-total">{arm_family_total}</span></div>
       <div class="card-sub">A1.Flex: <span>{arm_counts["A1"]}</span></div>
     </div>
   </div>
 
   <div class="pricing-note">
-    <strong>ℹ Pricing baseline:</strong> Feb-2026 OCI Calculator monthly USD estimates.
-    Actual tenancy billing may differ (discounts, credits, reserved capacity).
-    &check; / &times; / ? availability is best-effort (shape catalog + quota signals) and is checked with region-specific Compute/Limits clients.
+    <strong>ℹ Pricing baseline:</strong> Rough monthly USD estimates based on OCI Calculator values captured in the June-2026 report.
+    Actual tenancy billing may differ (discounts, credits, reserved capacity, region, usage pattern, and future price changes).
+    Browse the <a href="https://www.oracle.com/il-en/cloud/costestimator.html" target="_blank" rel="noopener noreferrer">OCI Cost Estimator</a>.
+    &check; / &times; availability is best-effort (shape catalog first, quota signals when accessible) and is checked with region-specific Compute/Limits clients.
     Creator column shows username only (email domain stripped); full value preserved in the CSV export.
   </div>
 
