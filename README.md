@@ -112,10 +112,10 @@ Inspired by Dragon Ball's Shenron - the dragon summoned to grant wishes - the to
 throughout the process: Shenron2 presents the current state, asks what should change, refreshes live values before submission, and displays the resulting request OCID.
 
 - 🔍 **Dynamically discovers OCI services** that expose service limits without relying on a hard-coded service list.
-- 🎯 **Supports scanning the complete tenancy** and region or selecting only the services relevant to the planned deployment.
+- 🎯 **Supports scanning the complete tenancy/region** or selecting only the services relevant to the planned deployment.
 - 📊 **Exports current limits**, usage, available capacity, scope, and availability-domain information to CSV.
 - ✏️ **Lets teams review and prepare requested increases** in the CSV before anything is submitted.
 - ⌨️ Provides an alternative guided **terminal workflow for entering increases without editing a CSV**.
 - 🔄 **Refreshes live OCI values before submission** to identify stale CSV values and validate each requested increase.
-- 📨 **Creates a consolidated OCI service limit increase request** and prominently displays the customer-visible RequestId.
+- 📨 **Creates a consolidated OCI service limit request** and prominently displays the customer-visible RequestId.
 - 🧾 Generates a human-readable **TXT receipt containing the execution identity, OCI context, request OCID, and submitted limits.**
