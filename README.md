@@ -98,7 +98,7 @@ ________________________________________________________________________________
 
 
 
-<img width="89" height="51" alt="image" src="https://github.com/user-attachments/assets/dafeebfd-18d0-41a4-be7f-2335b43c521d" /> **🐉 OCI OKE Limit LZ (June-2026')**
+<img width="89" height="51" alt="image" src="https://github.com/user-attachments/assets/dafeebfd-18d0-41a4-be7f-2335b43c521d" /> **🐉 Service Limit LandingZone (June-2026')**
 
 
 **Shenron** helps teams gain clear visibility into OCI service limits, current usage, and available capacity, and then turn that information into a controlled service limit increase request. It
