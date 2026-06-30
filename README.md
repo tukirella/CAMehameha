@@ -100,3 +100,22 @@ ________________________________________________________________________________
 
 <img width="89" height="51" alt="image" src="https://github.com/user-attachments/assets/dafeebfd-18d0-41a4-be7f-2335b43c521d" /> **🐉 OCI OKE Limit LZ (June-2026')**
 
+
+**Shenron** helps teams gain clear visibility into OCI service limits, current usage, and available capacity, and then turn that information into a controlled service limit increase request. It
+dynamically discovers the services available through the OCI Limits APIs, exports their current values into an editable CSV, and supports submitting only the increases explicitly selected by the
+user.
+Instead of manually navigating the OCI Console service by service and limit by limit, Shenron2 brings discovery, review, validation, and request creation into one guided OCI Cloud Shell workflow.
+It helps Cloud Adoption Managers, onboarding teams, cloud engineers, and customer-facing stakeholders prepare capacity requirements, reduce deployment delays, and maintain a clear record of every
+submitted request.
+
+Inspired by Dragon Ball's Shenron - the dragon summoned to grant wishes - the tool turns service limit requirements into a structured and auditable OCI request. The user remains in control
+throughout the process: Shenron2 presents the current state, asks what should change, refreshes live values before submission, and displays the resulting request OCID.
+
+- 🔍 **Dynamically discovers OCI services** that expose service limits without relying on a hard-coded service list.
+- 🎯 **Supports scanning the complete tenancy** and region or selecting only the services relevant to the planned deployment.
+- 📊 **Exports current limits**, usage, available capacity, scope, and availability-domain information to CSV.
+- ✏️ **Lets teams review and prepare requested increases** in the CSV before anything is submitted.
+- ⌨️ Provides an alternative guided **terminal workflow for entering increases without editing a CSV**.
+- 🔄 **Refreshes live OCI values before submission** to identify stale CSV values and validate each requested increase.
+- 📨 **Creates a consolidated OCI service limit increase request** and prominently displays the customer-visible RequestId.
+- 🧾 Generates a human-readable **TXT receipt containing the execution identity, OCI context, request OCID, and submitted limits.**
